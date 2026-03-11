@@ -589,13 +589,17 @@ export default function GameCanvas({ playerName }) {
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
       <canvas ref={canvasRef} style={{ display: 'block', imageRendering: 'pixelated' }} />
       {!connected && (
-        <div style={{
-          position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)',
-          color: '#ff6b6b', fontFamily: FONT, fontSize: 8,
-          background: 'rgba(0,0,0,0.75)', padding: '8px 16px',
-          letterSpacing: 1, border: '2px solid #ff6b6b',
-        }}>
-          connecting...
+        <div
+          onClick={() => window.location.reload()}
+          style={{
+            position: 'absolute', top: 16, left: '50%', transform: 'translateX(-50%)',
+            color: '#ff6b6b', fontFamily: FONT, fontSize: 8,
+            background: 'rgba(0,0,0,0.75)', padding: '8px 16px',
+            letterSpacing: 1, border: '2px solid #ff6b6b',
+            cursor: 'pointer', userSelect: 'none',
+          }}
+        >
+          connecting... (tap to retry)
         </div>
       )}
       <MessageInput onSend={(text) => sendRef.current?.(text)} />
