@@ -313,6 +313,8 @@ export default function GameCanvas({ playerName }) {
     walkTick: 0,        // increments each frame while moving
     facingDir: 1,       // 1 = right, -1 = left
     lastSentMove: 0,
+    camX: 0,            // camera world offset X
+    camY: 0,            // camera world offset Y
   })
   const rafRef = useRef(null)
   const [connected, setConnected] = useState(false)
@@ -403,7 +405,7 @@ export default function GameCanvas({ playerName }) {
 
     // ── Mouse events ──
     const onMouseDown = (e) => {
-      const mx = e.clientX, my = e.clientY
+      const mx = e.clientX + s.camX, my = e.clientY + s.camY
 
       // Balloon click → pop (priority)
       for (const [bid, b] of Object.entries(s.balloons)) {
@@ -413,12 +415,12 @@ export default function GameCanvas({ playerName }) {
         }
       }
 
-      // Canvas click → walk to that position
+      // Canvas click → walk to that position (world coords)
       s.moveTarget = { x: mx, y: my }
     }
 
     const onMouseMove = (e) => {
-      const mx = e.clientX, my = e.clientY
+      const mx = e.clientX + s.camX, my = e.clientY + s.camY
       s.hoveredBalloon = null
       for (const [bid, b] of Object.entries(s.balloons)) {
         if (isInBalloon(mx, my, b.x, b.floatY)) {
@@ -445,9 +447,26 @@ export default function GameCanvas({ playerName }) {
         for (let gy = 0; gy < canvas.height; gy += P * 8)
           ctx.fillRect(gx, gy, P, P)
 
-      // Floor
+      // Floor (screen-space — always anchored to bottom of viewport)
       ctx.fillStyle = 'rgba(255,255,255,0.07)'
       ctx.fillRect(0, canvas.height - P * 2, canvas.width, P)
+
+      // ── Camera: smoothly follow local player when near viewport edges ──
+      // lerp strength scales 0→1 based on how close to edge, so it eases in/out
+      if (s.myId && s.players[s.myId]) {
+        const p    = s.players[s.myId]
+        const EDGE = 250  // zone where camera starts waking up
+        const sx   = p.x - s.camX
+        const sy   = p.y - s.camY
+        const ox   = Math.max(0, EDGE - Math.min(sx, canvas.width  - sx)) / EDGE
+        const oy   = Math.max(0, EDGE - Math.min(sy, canvas.height - sy)) / EDGE
+        s.camX += (p.x - canvas.width  / 2 - s.camX) * ox * 0.05
+        s.camY += (p.y - canvas.height / 2 - s.camY) * oy * 0.05
+      }
+
+      // Apply camera transform for all world-space objects
+      ctx.save()
+      ctx.translate(-Math.round(s.camX), -Math.round(s.camY))
 
       // ── Move local player toward click target ──
       if (s.moveTarget && s.myId && s.players[s.myId]) {
@@ -547,6 +566,8 @@ export default function GameCanvas({ playerName }) {
         }
         drawStickman(ctx, p.x, p.y, p.name, isMe, p.id, frame, dir, idle)
       }
+
+      ctx.restore() // end camera transform
 
       canvas.style.cursor = s.hoveredBalloon ? 'pointer' : 'default'
 
