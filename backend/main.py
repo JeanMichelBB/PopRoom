@@ -15,11 +15,11 @@ from sqlalchemy import text as sql_text
 from database.connection import engine, SessionLocal, DATABASE_URL
 from database.models import PoppedBalloon, Base
 
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_ROOT_PASSWORD = os.getenv("DB_ROOT_PASSWORD", "sysadmsysadm")
-DB_USER = os.getenv("DB_USER", "poproom")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "poproom")
-DB_NAME = os.getenv("DB_NAME", "poproom")
+DB_HOST = os.getenv("DB_HOST")
+DB_ROOT_PASSWORD = os.getenv("DB_ROOT_PASSWORD")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
 
 # ── In-memory state ──────────────────────────────────────────────────────────
 players: dict = {}      # conn_id → {id, name, x, y}

@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poproom-backend
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: poproom-backend
+  template:
+    metadata:
+      labels:
+        app: poproom-backend
+    spec:
+      initContainers:
+        - name: wait-for-mysql
+          image: busybox
+          command: ['sh', '-c', 'until nc -z mysql 3306; do echo "Waiting for MySQL..."; sleep 3; done']
+      containers:
+        - name: poproom-backend
+          image: jeanmichelbb/poproom-be:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - secretRef:
+                name: poproom-backend-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: poproom-backend
+  namespace: default
+spec:
+  selector:
+    app: poproom-backend
+  ports:
+    - port: 8001
+      targetPort: 8001

@@ -1,0 +1,30 @@
+# Ingress — public via Cloudflare
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: poproom-ingress
+  namespace: default
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web,websecure
+spec:
+  rules:
+    - host: poproom.sacenpapier.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: poproom-frontend
+                port:
+                  number: 80
+    - host: poproomapi.sacenpapier.org
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: poproom-backend
+                port:
+                  number: 8001
