@@ -77,17 +77,32 @@ async def broadcast(message: dict, exclude_id: str = None):
         players.pop(conn_id, None)
 
 
+async def ping_loop(conn_id: str, websocket: WebSocket):
+    """Send a ping every 30s to keep the connection alive through Cloudflare."""
+    try:
+        while conn_id in connections:
+            await asyncio.sleep(30)
+            if conn_id in connections:
+                await websocket.send_json({"event": "ping"})
+    except Exception:
+        pass
+
+
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     conn_id = str(uuid.uuid4())
     connections[conn_id] = websocket
+    asyncio.create_task(ping_loop(conn_id, websocket))
 
     try:
         while True:
             raw = await websocket.receive_text()
             data = json.loads(raw)
             event = data.get("event")
+
+            if event == "pong":
+                continue
 
             if event == "join":
                 player = {

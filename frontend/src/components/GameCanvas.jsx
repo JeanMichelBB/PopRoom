@@ -334,6 +334,9 @@ export default function GameCanvas({ playerName }) {
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
       switch (msg.event) {
+        case 'ping':
+          ws.send(JSON.stringify({ event: 'pong' }))
+          return
         case 'init':
           s.myId    = msg.your_id
           s.players = Object.fromEntries(msg.players.map(p => [p.id, p]))
