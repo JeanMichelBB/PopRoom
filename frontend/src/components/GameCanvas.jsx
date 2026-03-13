@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import MessageInput from './MessageInput'
 
+const ZOOM_MIN = 0.25
+const ZOOM_MAX = 3
+const ZOOM_STEP = 0.15
+
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8001/ws'
 
 // ── Pixel art config ─────────────────────────────────────────────────────────
@@ -315,9 +319,14 @@ export default function GameCanvas({ playerName }) {
     lastSentMove: 0,
     camX: 0,            // camera world offset X
     camY: 0,            // camera world offset Y
+    zoom: 1,            // viewport zoom level (current, interpolated)
+    zoomTarget: 1,      // zoom level we're animating toward
+    resetting: false,   // true while auto-reset animation is running
   })
-  const rafRef = useRef(null)
+  const rafRef     = useRef(null)
+  const zoomReset  = useRef(null)
   const [connected, setConnected] = useState(false)
+  const [zoomDisplay, setZoomDisplay] = useState(100)
 
   const sendWS = useCallback((data) => {
     if (wsRef.current?.readyState === WebSocket.OPEN)
@@ -403,9 +412,17 @@ export default function GameCanvas({ playerName }) {
 
     ws.onclose = () => setConnected(false)
 
+    // ── Screen → world coordinate conversion ──
+    // Transform: translate(w/2,h/2) -> scale(zoom) -> translate(-w/2,-h/2) -> translate(-camX,-camY)
+    // Inverse:   wx = (sx - w/2) / zoom + w/2 + camX
+    const toWorld = (sx, sy) => ({
+      x: (sx - canvas.width  / 2) / s.zoom + canvas.width  / 2 + s.camX,
+      y: (sy - canvas.height / 2) / s.zoom + canvas.height / 2 + s.camY,
+    })
+
     // ── Mouse events ──
     const onMouseDown = (e) => {
-      const mx = e.clientX + s.camX, my = e.clientY + s.camY
+      const { x: mx, y: my } = toWorld(e.clientX, e.clientY)
 
       // Balloon click → pop (priority)
       for (const [bid, b] of Object.entries(s.balloons)) {
@@ -420,7 +437,7 @@ export default function GameCanvas({ playerName }) {
     }
 
     const onMouseMove = (e) => {
-      const mx = e.clientX + s.camX, my = e.clientY + s.camY
+      const { x: mx, y: my } = toWorld(e.clientX, e.clientY)
       s.hoveredBalloon = null
       for (const [bid, b] of Object.entries(s.balloons)) {
         if (isInBalloon(mx, my, b.x, b.floatY)) {
@@ -430,8 +447,86 @@ export default function GameCanvas({ playerName }) {
       }
     }
 
+    const applyZoom = (newZoom, pivotSx, pivotSy) => {
+      const oldZoom = s.zoom
+      s.zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom))
+      s.zoomTarget = s.zoom
+      s.resetting = false
+      // Shift camera so world point under pivot stays fixed
+      const px = pivotSx - canvas.width  / 2
+      const py = pivotSy - canvas.height / 2
+      s.camX += px * (1 / oldZoom - 1 / s.zoom)
+      s.camY += py * (1 / oldZoom - 1 / s.zoom)
+      setZoomDisplay(Math.round(s.zoom * 100))
+      // Smoothly animate back to 100% after 5 s of inactivity
+      clearTimeout(zoomReset.current)
+      zoomReset.current = setTimeout(() => { s.zoomTarget = 1; s.resetting = true }, 3000)
+    }
+
+    const onWheel = (e) => {
+      e.preventDefault()
+      const factor = e.deltaY < 0 ? 1 + ZOOM_STEP : 1 - ZOOM_STEP
+      applyZoom(s.zoom * factor, e.clientX, e.clientY)
+    }
+
+    const onKeyDown = (e) => {
+      if (e.ctrlKey && (e.key === '0' || e.key === 'NumPad0')) {
+        e.preventDefault()
+        applyZoom(1, canvas.width / 2, canvas.height / 2)
+      }
+    }
+
+    // ── Touch events (mobile) ──
+    let lastTouchDist = null  // null = no active pinch
+
+    const touchDist = (t1, t2) => {
+      const dx = t1.clientX - t2.clientX
+      const dy = t1.clientY - t2.clientY
+      return Math.sqrt(dx * dx + dy * dy)
+    }
+    const touchMid = (t1, t2) => ({
+      x: (t1.clientX + t2.clientX) / 2,
+      y: (t1.clientY + t2.clientY) / 2,
+    })
+
+    const onTouchStart = (e) => {
+      e.preventDefault()
+      if (e.touches.length === 2) {
+        lastTouchDist = touchDist(e.touches[0], e.touches[1])
+      } else if (e.touches.length === 1) {
+        lastTouchDist = null
+        // Treat as tap/move — reuse mouse logic
+        onMouseDown({ clientX: e.touches[0].clientX, clientY: e.touches[0].clientY })
+      }
+    }
+
+    const onTouchMove = (e) => {
+      e.preventDefault()
+      if (e.touches.length === 2) {
+        const newDist = touchDist(e.touches[0], e.touches[1])
+        if (lastTouchDist !== null) {
+          const { x: mx, y: my } = touchMid(e.touches[0], e.touches[1])
+          applyZoom(s.zoom * (newDist / lastTouchDist), mx, my)
+        }
+        lastTouchDist = newDist
+      } else if (e.touches.length === 1) {
+        lastTouchDist = null
+        onMouseMove({ clientX: e.touches[0].clientX, clientY: e.touches[0].clientY })
+      }
+    }
+
+    const onTouchEnd = (e) => {
+      e.preventDefault()
+      if (e.touches.length < 2) lastTouchDist = null
+    }
+
     canvas.addEventListener('mousedown', onMouseDown)
     canvas.addEventListener('mousemove', onMouseMove)
+    canvas.addEventListener('wheel', onWheel, { passive: false })
+    canvas.addEventListener('touchstart',  onTouchStart, { passive: false })
+    canvas.addEventListener('touchmove',   onTouchMove,  { passive: false })
+    canvas.addEventListener('touchend',    onTouchEnd,   { passive: false })
+    window.addEventListener('keydown', onKeyDown)
 
     // ── Render loop ──
     const render = () => {
@@ -451,21 +546,44 @@ export default function GameCanvas({ playerName }) {
       ctx.fillStyle = 'rgba(255,255,255,0.07)'
       ctx.fillRect(0, canvas.height - P * 2, canvas.width, P)
 
-      // ── Camera: smoothly follow local player when near viewport edges ──
-      // lerp strength scales 0→1 based on how close to edge, so it eases in/out
       if (s.myId && s.players[s.myId]) {
-        const p    = s.players[s.myId]
-        const EDGE = 250  // zone where camera starts waking up
-        const sx   = p.x - s.camX
-        const sy   = p.y - s.camY
-        const ox   = Math.max(0, EDGE - Math.min(sx, canvas.width  - sx)) / EDGE
-        const oy   = Math.max(0, EDGE - Math.min(sy, canvas.height - sy)) / EDGE
-        s.camX += (p.x - canvas.width  / 2 - s.camX) * ox * 0.05
-        s.camY += (p.y - canvas.height / 2 - s.camY) * oy * 0.05
+        const p = s.players[s.myId]
+
+        if (s.resetting) {
+          // Animate zoom + camera back to player-centered 100%
+          s.zoom += (s.zoomTarget - s.zoom) * 0.08
+          if (Math.abs(s.zoom - s.zoomTarget) < 0.001) s.zoom = s.zoomTarget
+          setZoomDisplay(Math.round(s.zoom * 100))
+
+          const targetCamX = p.x - canvas.width  / 2
+          const targetCamY = p.y - canvas.height / 2
+          s.camX += (targetCamX - s.camX) * 0.08
+          s.camY += (targetCamY - s.camY) * 0.08
+
+          if (s.zoom === s.zoomTarget &&
+              Math.abs(s.camX - targetCamX) < 0.5 &&
+              Math.abs(s.camY - targetCamY) < 0.5) {
+            s.camX = targetCamX
+            s.camY = targetCamY
+            s.resetting = false
+          }
+        } else {
+          // Normal edge-follow
+          const EDGE = 250
+          const sx = (p.x - s.camX - canvas.width  / 2) * s.zoom + canvas.width  / 2
+          const sy = (p.y - s.camY - canvas.height / 2) * s.zoom + canvas.height / 2
+          const ox = Math.max(0, EDGE - Math.min(sx, canvas.width  - sx)) / EDGE
+          const oy = Math.max(0, EDGE - Math.min(sy, canvas.height - sy)) / EDGE
+          s.camX += (p.x - canvas.width  / 2 - s.camX) * ox * 0.05
+          s.camY += (p.y - canvas.height / 2 - s.camY) * oy * 0.05
+        }
       }
 
-      // Apply camera transform for all world-space objects
+      // Apply camera + zoom transform for all world-space objects
       ctx.save()
+      ctx.translate(canvas.width / 2, canvas.height / 2)
+      ctx.scale(s.zoom, s.zoom)
+      ctx.translate(-canvas.width / 2, -canvas.height / 2)
       ctx.translate(-Math.round(s.camX), -Math.round(s.camY))
 
       // ── Move local player toward click target ──
@@ -578,8 +696,14 @@ export default function GameCanvas({ playerName }) {
 
     return () => {
       window.removeEventListener('resize', resize)
+      window.removeEventListener('keydown', onKeyDown)
       canvas.removeEventListener('mousedown', onMouseDown)
       canvas.removeEventListener('mousemove', onMouseMove)
+      canvas.removeEventListener('wheel', onWheel)
+      canvas.removeEventListener('touchstart', onTouchStart)
+      canvas.removeEventListener('touchmove',  onTouchMove)
+      canvas.removeEventListener('touchend',   onTouchEnd)
+      clearTimeout(zoomReset.current)
       cancelAnimationFrame(rafRef.current)
       ws.close()
     }
@@ -587,7 +711,7 @@ export default function GameCanvas({ playerName }) {
 
   return (
     <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
-      <canvas ref={canvasRef} style={{ display: 'block', imageRendering: 'pixelated' }} />
+      <canvas ref={canvasRef} style={{ display: 'block', imageRendering: 'pixelated', touchAction: 'none' }} />
       {!connected && (
         <div
           onClick={() => window.location.reload()}
@@ -602,7 +726,24 @@ export default function GameCanvas({ playerName }) {
           connecting... (tap to retry)
         </div>
       )}
-      <MessageInput onSend={(text) => sendRef.current?.(text)} />
+      <div style={{
+        position: 'fixed', bottom: 28, left: '50%', transform: 'translateX(-50%)',
+        display: 'flex', alignItems: 'center', gap: 10,
+      }}>
+        <MessageInput onSend={(text) => sendRef.current?.(text)} />
+        {zoomDisplay !== 100 && (
+          <span style={{
+            position: 'absolute', left: '100%', top: '50%',
+            transform: 'translateY(-50%)',
+            marginLeft: 10,
+            fontFamily: FONT, fontSize: 6,
+            color: 'rgba(255,255,255,0.35)', whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+          }}>
+            {zoomDisplay}%
+          </span>
+        )}
+      </div>
     </div>
   )
 }

@@ -16,7 +16,6 @@ export default function MessageInput({ onSend }) {
     <form
       onSubmit={handleSubmit}
       style={{
-        position: 'fixed', bottom: 28, left: '50%', transform: 'translateX(-50%)',
         display: 'flex', gap: 8, alignItems: 'center',
         background: '#0a0a0a', padding: '10px 14px',
         border: '3px solid #2a2a2a',
