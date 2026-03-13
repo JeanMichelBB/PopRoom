@@ -202,6 +202,15 @@ async def ws_endpoint(websocket: WebSocket):
                         "pile_item": pile_data,
                     })
 
+            elif event == "clean":
+                pile_item_id = data.get("pile_item_id")
+                if pile_item_id:
+                    db = SessionLocal()
+                    db.query(PoppedBalloon).filter(PoppedBalloon.id == pile_item_id).delete()
+                    db.commit()
+                    db.close()
+                    await broadcast({"event": "pile_item_cleaned", "pile_item_id": pile_item_id})
+
     except WebSocketDisconnect:
         connections.pop(conn_id, None)
         players.pop(conn_id, None)

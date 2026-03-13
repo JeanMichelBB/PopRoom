@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls ~/Documents/02_Work/Projects/PopRoom/ 2>/dev/null || ls ~/Documents/\\\\[02\\\\]_Work/Projects/PopRoom/ 2>/dev/null || find ~/Documents -name \"main.py\" -path \"*PopRoom*\" 2>/dev/null)",
+      "Bash(ls ~/Documents/\\\\[02\\\\]_Work/Projects/PopRoom/backend/)"
+    ]
+  }
+}

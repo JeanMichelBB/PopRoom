@@ -26,8 +26,15 @@ function playerColor(id) {
 
 function snap(v) { return Math.round(v / P) * P }
 
-// Deterministic 0‥1 value from a string seed (uses existing hashStr)
-function seededRand(seed) { return (hashStr(String(seed)) % 10000) / 10000 }
+// Deterministic 0‥1 value from a string seed — FNV-1a, full 32-bit range
+function seededRand(seed) {
+  let h = 2166136261 >>> 0
+  for (const c of String(seed)) {
+    h ^= c.charCodeAt(0)
+    h = Math.imul(h, 16777619) >>> 0
+  }
+  return h / 0xFFFFFFFF
+}
 
 // Draw one pixel-art "pixel" at grid offset (gx, gy) from base (bx, by)
 function pp(ctx, bx, by, gx, gy, color) {
@@ -277,18 +284,11 @@ function drawPileItem(ctx, x, y, text, angle = 0) {
 // Each item gets a seeded-random x scatter and rotation, then stacks on top of
 // whatever is already beneath it at that x. Layout is stored in a Map so it's
 // computed once per item and stays stable across frames.
-const PILE_COLLISION_W = P * 9   // horizontal overlap zone for stacking
-const PILE_ITEM_H      = P * 3   // vertical clearance between stacked items
 
-function placePileItem(item, layoutMap, fallX, fallY) {
+function placePileItem(item, layoutMap, x, y) {
   if (layoutMap.has(item.id)) return
-  // If we have an explicit landing spot (live fall), use it directly.
-  // For init items from the server, scatter 360° around the item's origin.
-  let x, y
-  if (fallX !== undefined && fallY !== undefined) {
-    x = fallX
-    y = fallY
-  } else {
+  if (x === undefined) {
+    // init path — scatter randomly around server position
     const theta  = Math.random() * Math.PI * 2
     const radius = 20 + Math.random() * 80
     x = (item.x ?? 0) + Math.cos(theta) * radius
@@ -321,6 +321,7 @@ export default function GameCanvas({ playerName }) {
     zoom: 1,            // viewport zoom level (current, interpolated)
     zoomTarget: 1,      // zoom level we're animating toward
     resetting: false,   // true while auto-reset animation is running
+    npc: null,          // lazy-initialized janitor bot
   })
   const rafRef     = useRef(null)
   const zoomReset  = useRef(null)
@@ -393,22 +394,31 @@ export default function GameCanvas({ playerName }) {
           s.balloons[b.id] = { ...b, floatY: b.y }
           break
         }
+        case 'pile_item_cleaned': {
+          s.pile       = s.pile.filter(i => i.id !== msg.pile_item_id)
+          s.pileLayout.delete(msg.pile_item_id)
+          break
+        }
         case 'balloon_popped': {
           const b = s.balloons[msg.balloon_id]
           if (b) {
-            const originY  = msg.pile_item?.y ?? b.y
+            const originX  = msg.pile_item?.x ?? b.x
+            const originY  = msg.pile_item?.y ?? (b.y + 70)
             const theta    = Math.random() * Math.PI * 2
             const radius   = 20 + Math.random() * 80
-            const targetX  = b.x + Math.cos(theta) * radius
+            const targetX  = originX + Math.cos(theta) * radius
             const targetY  = originY + Math.sin(theta) * radius
             const maxAngle = (Math.random() < 0.5 ? 1 : -1) *
                              (Math.PI / 4 + Math.random() * Math.PI / 4)
             s.falling[msg.balloon_id] = {
               ...b,
+              startX:    b.x,
+              startY:    b.floatY,
               currentX:  b.x,
               currentY:  b.floatY,
               targetX,
               targetY,
+              progress:  0,
               angle:     0,
               maxAngle,
               pile_item: msg.pile_item,
@@ -639,18 +649,17 @@ export default function GameCanvas({ playerName }) {
       // ── Falling balloons ──
       const toDelete = []
       for (const [bid, fb] of Object.entries(s.falling)) {
-        const totalDist = Math.abs(fb.targetY - fb.currentY)
-        fb.currentY += (fb.targetY - fb.currentY) * 0.12
-        fb.currentX += (fb.targetX - fb.currentX) * 0.05  // lazy drift
-        // Tumble: rotate proportionally to fall progress
-        const remaining = Math.abs(fb.currentY - fb.targetY)
-        const progress  = Math.max(0, 1 - remaining / Math.max(1, totalDist + remaining))
-        fb.angle = fb.maxAngle * progress
+        // Advance along a straight line using shared progress (no spiral)
+        fb.progress = Math.min(1, fb.progress + 0.018)
+        const t = fb.progress * fb.progress  // ease-in: accelerates like gravity
+        fb.currentX = fb.startX + (fb.targetX - fb.startX) * t
+        fb.currentY = fb.startY + (fb.targetY - fb.startY) * t
+        fb.angle    = fb.maxAngle * fb.progress
         drawBalloon(ctx, fb.currentX, fb.currentY, fb.player_id, false, fb.angle)
-        if (remaining < 1.5) {
+        if (fb.progress >= 1) {
           if (fb.pile_item) {
             s.pile.push(fb.pile_item)
-            placePileItem(fb.pile_item, s.pileLayout, fb.currentX, fb.currentY)
+            placePileItem(fb.pile_item, s.pileLayout, fb.targetX, fb.targetY)
           }
           toDelete.push(bid)
         }
@@ -668,6 +677,67 @@ export default function GameCanvas({ playerName }) {
         }
         drawBalloon(ctx, b.x, b.floatY, b.player_id, s.hoveredBalloon === b.id)
         drawHoverBubble(ctx, b.x, b.floatY, b.text, b.player_id)
+      }
+
+      // ── Janitor NPC ──
+      const NPC_SPEED    = 1.0
+      const NPC_PICKUP_R = 12
+
+      // Lazy-init: spawn offscreen near the floor once we know where the player is
+      if (!s.npc && s.myId && s.players[s.myId]) {
+        const p = s.players[s.myId]
+        s.npc = { x: p.x - 200, y: p.y, walkTick: 0, facingDir: 1, targetId: null, pickupPause: 0 }
+      }
+
+      if (s.npc) {
+        const npc = s.npc
+
+        // While pausing after a pickup, count down then resume
+        if (npc.pickupPause > 0) {
+          npc.pickupPause--
+        } else {
+          // Re-target if current target was removed
+          if (npc.targetId && !s.pileLayout.has(npc.targetId)) npc.targetId = null
+
+          // Pick nearest pile item
+          if (!npc.targetId && s.pile.length > 0) {
+            let nearest = null, nearestDist = Infinity
+            for (const item of s.pile) {
+              const pos = s.pileLayout.get(item.id)
+              if (!pos) continue
+              const dx = pos.x - npc.x, dy = pos.y - npc.y
+              const d  = Math.sqrt(dx * dx + dy * dy)
+              if (d < nearestDist) { nearestDist = d; nearest = item.id }
+            }
+            npc.targetId = nearest
+          }
+
+          if (npc.targetId) {
+            const pos = s.pileLayout.get(npc.targetId)
+            if (pos) {
+              const dx   = pos.x - npc.x
+              const dy   = pos.y - npc.y
+              const dist = Math.sqrt(dx * dx + dy * dy)
+
+              if (dist < NPC_PICKUP_R) {
+                // Notify server → deletes from DB + broadcasts to all clients
+                sendWS({ event: 'clean', pile_item_id: npc.targetId })
+                npc.targetId    = null
+                npc.walkTick    = 0
+                npc.pickupPause = 30  // ~0.5 s pause
+              } else {
+                npc.facingDir = dx > 0 ? 1 : -1
+                npc.x += (dx / dist) * NPC_SPEED
+                npc.y += (dy / dist) * NPC_SPEED
+                npc.walkTick++
+              }
+            }
+          }
+        }
+
+        const npcMoving = !!npc.targetId && npc.pickupPause === 0
+        const npcFrame  = npcMoving ? Math.floor(npc.walkTick / 6) % 4 : 0
+        drawStickman(ctx, npc.x, npc.y, 'Jani', false, 'npc-janitor', npcFrame, npc.facingDir, !npcMoving)
       }
 
       // ── Stickmen ──
