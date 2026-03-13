@@ -26,6 +26,9 @@ function playerColor(id) {
 
 function snap(v) { return Math.round(v / P) * P }
 
+// Deterministic 0‥1 value from a string seed (uses existing hashStr)
+function seededRand(seed) { return (hashStr(String(seed)) % 10000) / 10000 }
+
 // Draw one pixel-art "pixel" at grid offset (gx, gy) from base (bx, by)
 function pp(ctx, bx, by, gx, gy, color) {
   ctx.fillStyle = color
@@ -146,10 +149,17 @@ const BALLOON_ROWS = [
 // Shine pixels (top-left highlight)
 const BALLOON_SHINE = [[-3, -2], [-2, -3], [-2, -2], [-2, -1]]  // [gy, gx]
 
-function drawBalloon(ctx, x, y, playerId, hovered = false) {
+function drawBalloon(ctx, x, y, playerId, hovered = false, angle = 0) {
   const cx  = snap(x)
   const cy  = snap(y)
   const col = playerColor(playerId)
+
+  if (angle) {
+    ctx.save()
+    ctx.translate(cx, cy)
+    ctx.rotate(angle)
+    ctx.translate(-cx, -cy)
+  }
 
   const bp = (gx, gy, c) => {
     ctx.fillStyle = c
@@ -187,6 +197,8 @@ function drawBalloon(ctx, x, y, playerId, hovered = false) {
   ctx.fillStyle = 'rgba(255,255,255,0.35)'
   for (let i = 0; i < 3; i++)
     ctx.fillRect(cx, cy + (5 + i) * P, P, P)
+
+  if (angle) ctx.restore()
 }
 
 // ── Hover bubble (speech bubble shown when mouse is over a balloon) ───────────
@@ -261,43 +273,29 @@ function drawPileItem(ctx, x, y, text, angle = 0) {
   ctx.restore()
 }
 
-// ── Mountain pile layout ──────────────────────────────────────────────────────
-// Returns [{xOff, yOff}] for N items arranged in a pyramid.
-// Bottom row is widest; each row above narrows by one, with increasing jitter
-// so the pile looks like it can barely stay balanced.
-function getMountainPositions(N) {
-  if (N === 0) return []
+// ── Natural pile layout ───────────────────────────────────────────────────────
+// Each item gets a seeded-random x scatter and rotation, then stacks on top of
+// whatever is already beneath it at that x. Layout is stored in a Map so it's
+// computed once per item and stays stable across frames.
+const PILE_COLLISION_W = P * 9   // horizontal overlap zone for stacking
+const PILE_ITEM_H      = P * 3   // vertical clearance between stacked items
 
-  const ITEM_W = P * 7   // item is 7px wide — items touch with no gap
-  const ITEM_H = P * 3   // item is 3px tall — rows sit flush on each other
-
-  // Smallest triangle base that holds N items  (base*(base+1)/2 >= N)
-  let base = 1
-  while (base * (base + 1) / 2 < N) base++
-
-  const positions = []
-  let placed = 0, row = 0, rowSize = base
-
-  while (placed < N) {
-    const inRow = Math.min(rowSize, N - placed)
-    for (let col = 0; col < inRow; col++) {
-      // Center this row within the base row width
-      const xOff = (col - (rowSize - 1) / 2) * ITEM_W
-      const idx = positions.length
-      // x jitter grows with height — deterministic, no per-frame wiggle
-      const jitter = Math.sin(idx * 7.3 + row * 13.7) * row * P * 0.8
-      // Angle: floor items nearly flat, higher items increasingly tilted
-      const maxAngle = Math.min(Math.PI / 4, row * (Math.PI / 10) + Math.PI / 18)
-      const angle = Math.sin(idx * 5.1 + row * 9.3) * maxAngle
-      positions.push({ xOff: xOff + jitter, yOff: -row * ITEM_H, angle })
-      placed++
-    }
-    row++
-    rowSize--
-    if (rowSize <= 0) break
+function placePileItem(item, layoutMap, fallX, fallY) {
+  if (layoutMap.has(item.id)) return
+  // If we have an explicit landing spot (live fall), use it directly.
+  // For init items from the server, scatter 360° around the item's origin.
+  let x, y
+  if (fallX !== undefined && fallY !== undefined) {
+    x = fallX
+    y = fallY
+  } else {
+    const theta  = Math.random() * Math.PI * 2
+    const radius = 20 + Math.random() * 80
+    x = (item.x ?? 0) + Math.cos(theta) * radius
+    y = (item.y ?? 0) + Math.sin(theta) * radius
   }
-
-  return positions
+  const angle = (Math.random() - 0.5) * (Math.PI / 1.2)
+  layoutMap.set(item.id, { x, y, angle })
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -310,7 +308,8 @@ export default function GameCanvas({ playerName }) {
     players: {},   // id → {id, name, x, y}
     balloons: {},  // id → {id, player_id, text, x, y, floatY}
     falling: {},   // id → {text, x, currentY, targetY, pile_item}
-    pile: [],      // [{id, text, player_name, x}]
+    pile: [],          // [{id, text, player_name, x, y}]
+    pileLayout: new Map(), // id → {x, y, angle} — client-side display positions
     hoveredBalloon: null,
     autoPopped: new Set(),  // balloon ids already sent an auto-pop to avoid spam
     moveTarget: null,   // {x, y} — where the local player is walking to
@@ -370,6 +369,8 @@ export default function GameCanvas({ playerName }) {
             msg.balloons.map(b => [b.id, { ...b, floatY: b.y }])
           )
           s.pile = msg.pile
+          s.pileLayout.clear()
+          for (const item of msg.pile) placePileItem(item, s.pileLayout)
           break
         case 'player_joined':
           s.players[msg.player.id] = msg.player
@@ -395,11 +396,21 @@ export default function GameCanvas({ playerName }) {
         case 'balloon_popped': {
           const b = s.balloons[msg.balloon_id]
           if (b) {
-            const landY = msg.pile_item?.y ?? (b.y + 70)
+            const originY  = msg.pile_item?.y ?? b.y
+            const theta    = Math.random() * Math.PI * 2
+            const radius   = 20 + Math.random() * 80
+            const targetX  = b.x + Math.cos(theta) * radius
+            const targetY  = originY + Math.sin(theta) * radius
+            const maxAngle = (Math.random() < 0.5 ? 1 : -1) *
+                             (Math.PI / 4 + Math.random() * Math.PI / 4)
             s.falling[msg.balloon_id] = {
               ...b,
+              currentX:  b.x,
               currentY:  b.floatY,
-              targetY:   landY,
+              targetX,
+              targetY,
+              angle:     0,
+              maxAngle,
               pile_item: msg.pile_item,
             }
             delete s.balloons[msg.balloon_id]
@@ -619,34 +630,28 @@ export default function GameCanvas({ playerName }) {
       // ── Target marker ──
       if (s.moveTarget) drawTarget(ctx, s.moveTarget.x, s.moveTarget.y)
 
-      // ── Pile (mountain shape) ──
-      // Group items by 2D proximity, then draw each group as a pyramid
-      const buckets = {}
+      // ── Pile (natural scattered layout) ──
       for (const item of s.pile) {
-        const kx = Math.round(item.x / (P * 22))
-        const ky = Math.round(item.y / (P * 22))
-        const key = `${kx}_${ky}`
-        if (!buckets[key]) buckets[key] = []
-        buckets[key].push(item)
-      }
-      for (const items of Object.values(buckets)) {
-        // Base center: average x, max y (lowest screen position = floor of pile)
-        const cx = items.reduce((s, i) => s + i.x, 0) / items.length
-        const cy = Math.max(...items.map(i => i.y))
-        const positions = getMountainPositions(items.length)
-        for (let i = 0; i < items.length; i++) {
-          const { xOff, yOff, angle } = positions[i]
-          drawPileItem(ctx, cx + xOff, cy + yOff, items[i].text, angle)
-        }
+        const pos = s.pileLayout.get(item.id)
+        if (pos) drawPileItem(ctx, pos.x, pos.y, item.text, pos.angle)
       }
 
       // ── Falling balloons ──
       const toDelete = []
       for (const [bid, fb] of Object.entries(s.falling)) {
-        fb.currentY += (fb.targetY - fb.currentY) * 0.15
-        drawBalloon(ctx, fb.x, fb.currentY, fb.player_id)
-        if (Math.abs(fb.currentY - fb.targetY) < 1.5) {
-          if (fb.pile_item) s.pile.push(fb.pile_item)
+        const totalDist = Math.abs(fb.targetY - fb.currentY)
+        fb.currentY += (fb.targetY - fb.currentY) * 0.12
+        fb.currentX += (fb.targetX - fb.currentX) * 0.05  // lazy drift
+        // Tumble: rotate proportionally to fall progress
+        const remaining = Math.abs(fb.currentY - fb.targetY)
+        const progress  = Math.max(0, 1 - remaining / Math.max(1, totalDist + remaining))
+        fb.angle = fb.maxAngle * progress
+        drawBalloon(ctx, fb.currentX, fb.currentY, fb.player_id, false, fb.angle)
+        if (remaining < 1.5) {
+          if (fb.pile_item) {
+            s.pile.push(fb.pile_item)
+            placePileItem(fb.pile_item, s.pileLayout, fb.currentX, fb.currentY)
+          }
           toDelete.push(bid)
         }
       }
