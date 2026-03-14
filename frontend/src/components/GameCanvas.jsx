@@ -306,12 +306,11 @@ export default function GameCanvas({ playerName }) {
   const stateRef  = useRef({
     myId: null,
     players: {},   // id → {id, name, x, y}
-    balloons: {},  // id → {id, player_id, text, x, y, floatY}
+    balloons: {},  // id → {id, player_id, text, x, y, floatY, createdAt}
     falling: {},   // id → {text, x, currentY, targetY, pile_item}
     pile: [],          // [{id, text, player_name, x, y}]
     pileLayout: new Map(), // id → {x, y, angle} — client-side display positions
     hoveredBalloon: null,
-    autoPopped: new Set(),  // balloon ids already sent an auto-pop to avoid spam
     moveTarget: null,   // {x, y} — where the local player is walking to
     walkTick: 0,        // increments each frame while moving
     facingDir: 1,       // 1 = right, -1 = left
@@ -367,7 +366,7 @@ export default function GameCanvas({ playerName }) {
           s.myId    = msg.your_id
           s.players = Object.fromEntries(msg.players.map(p => [p.id, p]))
           s.balloons = Object.fromEntries(
-            msg.balloons.map(b => [b.id, { ...b, floatY: b.y }])
+            msg.balloons.map(b => [b.id, { ...b, floatY: b.y, createdAt: Date.now() }])
           )
           s.pile = msg.pile
           s.pileLayout.clear()
@@ -391,7 +390,7 @@ export default function GameCanvas({ playerName }) {
           break
         case 'new_balloon': {
           const b = msg.balloon
-          s.balloons[b.id] = { ...b, floatY: b.y }
+          s.balloons[b.id] = { ...b, floatY: b.y, createdAt: Date.now() }
           break
         }
         case 'pile_item_cleaned': {
@@ -424,7 +423,6 @@ export default function GameCanvas({ playerName }) {
               pile_item: msg.pile_item,
             }
             delete s.balloons[msg.balloon_id]
-            s.autoPopped.delete(msg.balloon_id)
           }
           break
         }
@@ -667,11 +665,11 @@ export default function GameCanvas({ playerName }) {
       for (const bid of toDelete) delete s.falling[bid]
 
       // ── Floating balloons (bubble always visible, outline appears on hover) ──
+      const now = Date.now()
       for (const b of Object.values(s.balloons)) {
         b.floatY -= 0.35
-        // Auto-pop when fully off the top of the screen
-        if (b.floatY < -P * 8 && !s.autoPopped.has(b.id)) {
-          s.autoPopped.add(b.id)
+        // Auto-pop after 20 seconds
+        if (now - b.createdAt >= 20000) {
           sendWS({ event: 'pop', balloon_id: b.id })
           continue
         }
