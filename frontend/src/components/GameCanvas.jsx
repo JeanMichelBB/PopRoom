@@ -36,6 +36,19 @@ function seededRand(seed) {
   return h / 0xFFFFFFFF
 }
 
+// Deterministic 0‥1 value from (bx, by, salt) via integer mixing (Murmur3-style
+// finalizer). String-based hashes like seededRand don't diffuse well over very
+// short, near-identical inputs (e.g. "pond_-1_0" vs "pond_-1_1") — that showed
+// up as ponds banding along a single column instead of scattering naturally.
+// Multiplying each coordinate by a large odd constant before mixing avoids it.
+function hash2D(bx, by, salt) {
+  let h = (Math.imul(bx, 374761393) + Math.imul(by, 668265263) + Math.imul(salt, 2246822519)) >>> 0
+  h = Math.imul(h ^ (h >>> 15), 2246822519)
+  h = Math.imul(h ^ (h >>> 13), 3266489917)
+  h ^= h >>> 16
+  return (h >>> 0) / 0xFFFFFFFF
+}
+
 // Draw one pixel-art "pixel" at grid offset (gx, gy) from base (bx, by)
 function pp(ctx, bx, by, gx, gy, color) {
   ctx.fillStyle = color
@@ -280,6 +293,409 @@ function drawPileItem(ctx, x, y, text, angle = 0) {
   ctx.restore()
 }
 
+// ── Park background (trees, bushes, rocks, stumps, logs, pond — all
+// collidable — plus non-collidable decor: mushrooms, ferns, flowers, dirt
+// patches, and ambient fireflies) ────────────────────────────────────────────
+const PARK_CELL   = 90   // scatter grid pitch (world units)
+const PARK_EXTENT = 30   // grid spans -30..30 cells each axis — covers well past any normal viewport, even zoomed out
+const PLAYER_R    = P * 3  // collision radius around player feet
+
+// Pixel-art silhouettes — [rowOffset, fromX, toX] technique, same as
+// BALLOON_ROWS, kept blocky to match the rest of the art style.
+function buildFirRows(height, maxHalfWidth) {
+  const rows = []
+  for (let i = 0; i < height; i++) {
+    const ry = -(height - 1 - i)                // -(height-1) at tip .. 0 at base
+    const t  = i / (height - 1)                 // 0 at tip .. 1 at base
+    const halfW = Math.round(maxHalfWidth * t)
+    rows.push([ry, -halfW, halfW])
+  }
+  return rows
+}
+const TREE_CANOPY_ROWS = buildFirRows(30, 10)  // 3x taller, 2x wider than original
+const BUSH_ROWS = [
+  [-2, -2, 2],
+  [-1, -3, 3],
+  [ 0, -3, 3],
+  [ 1, -2, 2],
+]
+const ROCK_ROWS = [
+  [-1, -2, 2],
+  [ 0, -3, 3],
+]
+const STUMP_ROWS = [
+  [-2, -2, 2],
+  [-1, -2, 2],
+  [ 0, -2, 2],
+]
+const LOG_ROWS = [
+  [-1, -6, 6],
+  [ 0, -6, 6],
+]
+
+// Deterministic scattered park centered on the player's spawn point, with a
+// clearing left open around the origin. Sparse + jittered so it reads as
+// naturally placed rather than gridded. Returns { obstacles, decor } —
+// obstacles block movement, decor is purely visual (too low-profile to need
+// occlusion sorting against players).
+function buildParkObstacles(originX, originY) {
+  const obstacles = []
+  const decor = []
+
+  // ── Ponds — rare, larger features placed on a coarser grid so they don't
+  // tile like the small scatter items. Nearby cells skip normal decoration
+  // so trees/bushes don't spawn inside the water. ──
+  const WORLD_EDGE = PARK_EXTENT * PARK_CELL  // true edge of the populated (tree/grass) region
+  const ponds = []
+  const POND_BLOCK = PARK_CELL * 8
+  const pondRange  = Math.ceil(WORLD_EDGE / POND_BLOCK) + 1
+  for (let by = -pondRange; by <= pondRange; by++) {
+    for (let bx = -pondRange; bx <= pondRange; bx++) {
+      const seed = `pond_${bx}_${by}`
+      if (hash2D(bx, by, 1) > 0.12) continue  // ~12% of coarse blocks get a pond
+      const jx = (hash2D(bx, by, 2) - 0.5) * POND_BLOCK * 0.5
+      const jy = (hash2D(bx, by, 3) - 0.5) * POND_BLOCK * 0.5
+      const cx = originX + bx * POND_BLOCK + jx
+      const cy = originY + by * POND_BLOCK + jy
+      if (Math.abs(cx - originX) < 350 && Math.abs(cy - originY) < 350) continue  // keep spawn clear
+      // Clamp to the actual populated region — the coarse block grid can
+      // overshoot past where any trees/grass exist, which reads as "outside
+      // the map" rather than scattered naturally through it.
+      if (Math.abs(cx - originX) > WORLD_EDGE - 300 || Math.abs(cy - originY) > WORLD_EDGE - 300) continue
+      const r = PARK_CELL * (1.8 + hash2D(bx, by, 4) * 0.8)
+      // Radius wobble — two sine harmonics give an organic, non-circular
+      // outline (a broad 2-3 lobe bulge plus finer irregularity) instead of
+      // a perfect circle. Fixed per-pond so the shape is stable and
+      // identical across every client.
+      const a1 = 0.15 + hash2D(bx, by, 5) * 0.15
+      const f1 = 2 + Math.floor(hash2D(bx, by, 6) * 2)       // 2-3 broad lobes
+      const p1 = hash2D(bx, by, 7) * Math.PI * 2
+      const a2 = 0.08 + hash2D(bx, by, 8) * 0.1
+      const f2 = 4 + Math.floor(hash2D(bx, by, 9) * 3)       // 4-6 finer wobbles
+      const p2 = hash2D(bx, by, 10) * Math.PI * 2
+      const maxR = r * (1 + a1 + a2)
+      ponds.push({ cx, cy, r, maxR, a1, f1, p1, a2, f2, p2, seed })
+    }
+  }
+  for (const pond of ponds) {
+    // Pond is decor only, not a hard obstacle — walking into water slows the
+    // player down (see isInPond / the movement step) rather than blocking them.
+    const o = { type: 'pond', cx: pond.cx, cy: pond.cy, r: pond.r, seed: pond.seed,
+                a1: pond.a1, f1: pond.f1, p1: pond.p1, a2: pond.a2, f2: pond.f2, p2: pond.p2 }
+    decor.push(o)
+  }
+  const nearAnyPond = (cx, cy) => ponds.some(p => {
+    const dx = cx - p.cx, dy = cy - p.cy
+    return Math.sqrt(dx * dx + dy * dy) < p.maxR + PARK_CELL
+  })
+
+  // ── Grass tufts — dense ground-level texture, fine grid, no collision.
+  // Drawn as a base layer so mushrooms/flowers/dirt patches sit on top of it. ──
+  const GRASS_CELL  = 32
+  const grassRange  = Math.ceil((PARK_EXTENT * PARK_CELL) / GRASS_CELL)
+  for (let gy = -grassRange; gy <= grassRange; gy++) {
+    for (let gx = -grassRange; gx <= grassRange; gx++) {
+      const seed = `grass_${gx}_${gy}`
+      if (seededRand(seed) > 0.45) continue  // ~45% fill — dense but patchy, not solid
+      const jx = (seededRand(seed + 'jx') - 0.5) * GRASS_CELL
+      const jy = (seededRand(seed + 'jy') - 0.5) * GRASS_CELL
+      const cx = originX + gx * GRASS_CELL + jx
+      const cy = originY + gy * GRASS_CELL + jy
+      if (nearAnyPond(cx, cy)) continue  // no grass floating on water
+      decor.push({ type: 'grass', cx, cy, seed })
+    }
+  }
+
+  for (let gy = -PARK_EXTENT; gy <= PARK_EXTENT; gy++) {
+    // Stagger alternating rows by half a cell so the scatter doesn't read as
+    // a visible grid (like brick/hex offset rather than straight columns)
+    const rowOffset = (gy % 2 !== 0) ? PARK_CELL / 2 : 0
+
+    for (let gx = -PARK_EXTENT; gx <= PARK_EXTENT; gx++) {
+      if (Math.abs(gx) <= 1 && Math.abs(gy) <= 1) continue  // spawn clearing
+      const seed = `park_${gx}_${gy}`
+      const r = seededRand(seed)
+      if (r < 0.45) continue  // most cells stay empty grass
+
+      const jx = (seededRand(seed + 'jx') - 0.5) * (PARK_CELL * 0.95)
+      const jy = (seededRand(seed + 'jy') - 0.5) * (PARK_CELL * 0.95)
+      const cx = originX + gx * PARK_CELL + rowOffset + jx
+      const cy = originY + gy * PARK_CELL + jy
+
+      if (nearAnyPond(cx, cy)) continue  // keep pond edges clear
+
+      // r in (0.45, 1.0]: tree 38% / bush 7% / rock 3% / stump 2% / log 1.5%
+      // / mushroom 1% / fern 1% / flower 1.5% (decor)
+      if (r < 0.83) {
+        const tr = P * 2  // collision only at the trunk, so the canopy can overhang
+        obstacles.push({ type: 'tree', cx, cy, seed, x: cx - tr, y: cy - tr, w: tr * 2, h: tr * 2 })
+      } else if (r < 0.90) {
+        const br = P * 3.5
+        obstacles.push({ type: 'bush', cx, cy, seed, x: cx - br, y: cy - br, w: br * 2, h: br * 2 })
+      } else if (r < 0.93) {
+        const rr = P * 2.5
+        obstacles.push({ type: 'rock', cx, cy, seed, x: cx - rr, y: cy - rr, w: rr * 2, h: rr * 2 })
+      } else if (r < 0.95) {
+        const sr = P * 2
+        obstacles.push({ type: 'stump', cx, cy, seed, x: cx - sr, y: cy - sr, w: sr * 2, h: sr * 2 })
+      } else if (r < 0.965) {
+        const angled = seededRand(seed + 'rot') > 0.5
+        const lw = angled ? P * 3 : P * 7
+        const lh = angled ? P * 7 : P * 3
+        obstacles.push({ type: 'log', cx, cy, seed, angled, x: cx - lw, y: cy - lh, w: lw * 2, h: lh * 2 })
+      } else if (r < 0.975) {
+        decor.push({ type: 'mushroom', cx, cy, seed })
+      } else if (r < 0.985) {
+        decor.push({ type: 'fern', cx, cy, seed })
+      } else {
+        decor.push({ type: 'flower', cx, cy, seed })
+      }
+    }
+  }
+
+  // ── Dirt patches — sparse worn-ground blotches, coarser grid, no collision ──
+  const DIRT_BLOCK = PARK_CELL * 3
+  const dirtRange  = Math.ceil(WORLD_EDGE / DIRT_BLOCK) + 1
+  for (let by = -dirtRange; by <= dirtRange; by++) {
+    for (let bx = -dirtRange; bx <= dirtRange; bx++) {
+      const seed = `dirt_${bx}_${by}`
+      if (hash2D(bx, by, 21) > 0.1) continue  // ~10% of blocks get a dirt patch
+      const jx = (hash2D(bx, by, 22) - 0.5) * DIRT_BLOCK * 0.6
+      const jy = (hash2D(bx, by, 23) - 0.5) * DIRT_BLOCK * 0.6
+      const cx = originX + bx * DIRT_BLOCK + jx
+      const cy = originY + by * DIRT_BLOCK + jy
+      if (Math.abs(cx - originX) > WORLD_EDGE || Math.abs(cy - originY) > WORLD_EDGE) continue
+      decor.push({ type: 'dirt', cx, cy, seed })
+    }
+  }
+
+  // ── Fireflies — sparse ambient particles, animated per-frame, no collision ──
+  const FIREFLY_BLOCK = PARK_CELL * 2.5
+  const fireflyRange  = Math.ceil(WORLD_EDGE / FIREFLY_BLOCK) + 1
+  for (let by = -fireflyRange; by <= fireflyRange; by++) {
+    for (let bx = -fireflyRange; bx <= fireflyRange; bx++) {
+      const seed = `firefly_${bx}_${by}`
+      if (hash2D(bx, by, 31) > 0.15) continue  // ~15% of blocks get a firefly
+      const jx = (hash2D(bx, by, 32) - 0.5) * FIREFLY_BLOCK
+      const jy = (hash2D(bx, by, 33) - 0.5) * FIREFLY_BLOCK
+      const fcx = originX + bx * FIREFLY_BLOCK + jx
+      const fcy = originY + by * FIREFLY_BLOCK + jy
+      if (Math.abs(fcx - originX) > WORLD_EDGE || Math.abs(fcy - originY) > WORLD_EDGE) continue
+      decor.push({
+        type: 'firefly', seed,
+        cx: fcx,
+        cy: fcy,
+        phase: seededRand(seed + 'phase') * Math.PI * 2,
+      })
+    }
+  }
+
+  return { obstacles, decor }
+}
+
+function drawTree(ctx, o) {
+  const cx = snap(o.cx), groundY = snap(o.cy)
+  const hue = 95 + (hashStr(o.seed) % 30)
+  const dark  = `hsl(${hue}, 32%, 18%)`
+  const mid   = `hsl(${hue}, 38%, 26%)`
+  const light = `hsl(${hue}, 42%, 34%)`
+  const bp = (gx, gy, c) => { ctx.fillStyle = c; ctx.fillRect(cx + gx * P, groundY + gy * P, P, P) }
+
+  // Trunk
+  ctx.fillStyle = '#4a3222'
+  ctx.fillRect(cx - P, groundY - 2 * P, P * 2, P * 2)
+
+  // Canopy, sat just above the trunk
+  for (const [ry, from, to] of TREE_CANOPY_ROWS) {
+    for (let gx = from; gx <= to; gx++) {
+      const shade = seededRand(`${o.seed}_${ry}_${gx}`)
+      bp(gx, ry - 2, shade > 0.7 ? light : shade > 0.35 ? mid : dark)
+    }
+  }
+}
+
+function drawBush(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  const hue = 95 + (hashStr(o.seed) % 25)
+  const dark  = `hsl(${hue}, 28%, 16%)`
+  const mid   = `hsl(${hue}, 34%, 24%)`
+  const light = `hsl(${hue}, 38%, 32%)`
+  const bp = (gx, gy, c) => { ctx.fillStyle = c; ctx.fillRect(cx + gx * P, cy + gy * P, P, P) }
+
+  for (const [ry, from, to] of BUSH_ROWS) {
+    for (let gx = from; gx <= to; gx++) {
+      const shade = seededRand(`${o.seed}_bush_${ry}_${gx}`)
+      bp(gx, ry, shade > 0.7 ? light : shade > 0.35 ? mid : dark)
+    }
+  }
+}
+
+function drawRock(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  const hue = hashStr(o.seed) % 360
+  const dark  = `hsl(${hue}, 8%, 30%)`
+  const mid   = `hsl(${hue}, 8%, 40%)`
+  const light = `hsl(${hue}, 8%, 52%)`
+  const bp = (gx, gy, c) => { ctx.fillStyle = c; ctx.fillRect(cx + gx * P, cy + gy * P, P, P) }
+
+  for (const [ry, from, to] of ROCK_ROWS) {
+    for (let gx = from; gx <= to; gx++) {
+      const shade = seededRand(`${o.seed}_rock_${ry}_${gx}`)
+      bp(gx, ry, shade > 0.75 ? light : shade > 0.35 ? mid : dark)
+    }
+  }
+}
+
+function drawStump(ctx, o) {
+  const cx = snap(o.cx), groundY = snap(o.cy)
+  const bp = (gx, gy, c) => { ctx.fillStyle = c; ctx.fillRect(cx + gx * P, groundY + gy * P, P, P) }
+
+  for (const [ry, from, to] of STUMP_ROWS) {
+    for (let gx = from; gx <= to; gx++) bp(gx, ry, ry === -2 ? '#6b4a30' : '#4a3222')
+  }
+  // Growth rings on the cut top face
+  bp(0, -2, '#7a5a3a')
+  bp(-1, -2, '#5a3d26')
+  bp(1, -2, '#5a3d26')
+}
+
+function drawLog(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  const bp = (gx, gy, c) => { ctx.fillStyle = c; ctx.fillRect(cx + gx * P, cy + gy * P, P, P) }
+  const rows = o.angled
+    ? LOG_ROWS.map(([ry, from, to]) => [ry, from, to])  // same shape; angled just swaps draw axis below
+    : LOG_ROWS
+
+  for (const [ry, from, to] of rows) {
+    for (let gx = from; gx <= to; gx++) {
+      const c = ry === -1 ? '#6b4a30' : '#4a3222'
+      if (o.angled) bp(ry, gx, c)  // transpose for a vertical-ish log
+      else bp(gx, ry, c)
+    }
+  }
+  // Cut end cap (rings) at one tip
+  const capC = '#7a5a3a'
+  if (o.angled) { bp(0, -6, capC); bp(-1, -6, capC); bp(1, -6, capC) }
+  else { bp(6, 0, capC); bp(6, -1, capC); bp(6, 1, capC) }
+}
+
+function drawPond(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  const step = P * 2
+  const maxR = o.r * (1 + o.a1 + o.a2)
+  ctx.fillStyle = '#1f3a44'
+  for (let dy = -maxR; dy <= maxR; dy += step) {
+    for (let dx = -maxR; dx <= maxR; dx += step) {
+      const dist  = Math.sqrt(dx * dx + dy * dy)
+      const theta = Math.atan2(dy, dx)
+      const wobble = 1 + o.a1 * Math.sin(o.f1 * theta + o.p1) + o.a2 * Math.sin(o.f2 * theta + o.p2)
+      if (dist > o.r * wobble) continue
+      ctx.fillRect(cx + dx, cy + dy, step, step)
+    }
+  }
+  // A few lighter "shine" blocks for texture
+  ctx.fillStyle = 'rgba(180,220,230,0.25)'
+  for (let i = 0; i < 5; i++) {
+    const a = (hashStr(o.seed + i) % 360) * Math.PI / 180
+    const rr = o.r * 0.5 * seededRand(o.seed + 'shine' + i)
+    ctx.fillRect(cx + Math.cos(a) * rr, cy + Math.sin(a) * rr, step, step)
+  }
+}
+
+function drawMushroom(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  const hue = hashStr(o.seed) % 360
+  ctx.fillStyle = '#e8dcc8'
+  ctx.fillRect(cx - P / 2, cy - P, P, P)  // stem
+  ctx.fillStyle = `hsl(${hue}, 55%, 45%)`
+  ctx.fillRect(cx - P, cy - 2 * P, P * 2, P)  // cap
+  ctx.fillStyle = 'rgba(255,255,255,0.6)'
+  ctx.fillRect(cx - P / 2, cy - 2 * P, P / 2, P / 2)  // cap spot
+}
+
+function drawGrassTuft(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  const hue   = 95 + (hashStr(o.seed) % 20)
+  const shade = seededRand(o.seed + 'shade')
+  ctx.fillStyle = `hsl(${hue}, ${35 + shade * 15}%, ${20 + shade * 14}%)`
+  ctx.fillRect(cx, cy - P, P, P)
+  if (seededRand(o.seed + 'b2') > 0.4) ctx.fillRect(cx - P, cy, P, P)
+  if (seededRand(o.seed + 'b3') > 0.4) ctx.fillRect(cx + P, cy, P, P)
+}
+
+function drawFern(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  const hue = 100 + (hashStr(o.seed) % 20)
+  const col = `hsl(${hue}, 45%, 32%)`
+  ctx.fillStyle = col
+  ctx.fillRect(cx, cy - 3 * P, P, P)
+  ctx.fillRect(cx - P, cy - 2 * P, P, P)
+  ctx.fillRect(cx + P, cy - 2 * P, P, P)
+  ctx.fillRect(cx - P, cy - P, P, P)
+  ctx.fillRect(cx + P, cy - P, P, P)
+  ctx.fillRect(cx - 2 * P, cy, P, P)
+  ctx.fillRect(cx + 2 * P, cy, P, P)
+}
+
+function drawFlower(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  const hue = hashStr(o.seed) % 360
+  ctx.fillStyle = '#3a6b2a'
+  ctx.fillRect(cx, cy, P, P)  // stem
+  ctx.fillStyle = `hsl(${hue}, 70%, 65%)`
+  ctx.fillRect(cx - P / 2, cy - P, P, P)  // bloom
+}
+
+function drawDirtPatch(ctx, o) {
+  const cx = snap(o.cx), cy = snap(o.cy)
+  ctx.fillStyle = 'rgba(90,70,45,0.35)'
+  const blobs = [[0, 0, 4], [-3, 1, 3], [3, -1, 3], [1, 2, 2], [-2, -2, 2]]
+  for (const [dx, dy, r] of blobs) {
+    ctx.fillRect(cx + dx * P - r * P / 2, cy + dy * P - r * P / 2, r * P, r * P)
+  }
+}
+
+function drawFirefly(ctx, o, t) {
+  const drift = 14
+  const x = o.cx + Math.cos(t * 0.6 + o.phase) * drift
+  const y = o.cy + Math.sin(t * 0.5 + o.phase * 1.3) * drift - 20  // float at head height
+  const alpha = 0.35 + 0.35 * (0.5 + 0.5 * Math.sin(t * 2 + o.phase))
+  ctx.fillStyle = `rgba(255,244,150,${alpha * 0.4})`
+  ctx.fillRect(snap(x) - P, snap(y) - P, P * 3, P * 3)  // soft outer glow
+  ctx.fillStyle = `rgba(255,255,220,${alpha})`
+  ctx.fillRect(snap(x), snap(y), P, P)  // bright core
+}
+
+// Built once at a fixed world origin so every client sees the same map —
+// obstacles must line up regardless of where each player happens to spawn.
+const { obstacles: PARK_OBSTACLES, decor: PARK_DECOR } = buildParkObstacles(0, 0)
+
+// True if a player standing at (px, py) would overlap any obstacle
+function isBlocked(px, py, obstacles) {
+  for (const o of obstacles) {
+    if (px + PLAYER_R > o.x && px - PLAYER_R < o.x + o.w &&
+        py + PLAYER_R > o.y && py - PLAYER_R < o.y + o.h) return true
+  }
+  return false
+}
+
+// True if (px, py) falls inside a pond's actual wobbled outline (not just
+// its bounding box) — used to slow the player down while swimming.
+function isInPond(pond, px, py) {
+  const dx = px - pond.cx, dy = py - pond.cy
+  const dist  = Math.sqrt(dx * dx + dy * dy)
+  const theta = Math.atan2(dy, dx)
+  const wobble = 1 + pond.a1 * Math.sin(pond.f1 * theta + pond.p1) + pond.a2 * Math.sin(pond.f2 * theta + pond.p2)
+  return dist <= pond.r * wobble
+}
+
+function isInAnyPond(decor, px, py) {
+  for (const o of decor) {
+    if (o.type === 'pond' && isInPond(o, px, py)) return true
+  }
+  return false
+}
+
 // ── Natural pile layout ───────────────────────────────────────────────────────
 // Each item gets a seeded-random x scatter and rotation, then stacks on top of
 // whatever is already beneath it at that x. Layout is stored in a Map so it's
@@ -321,6 +737,8 @@ export default function GameCanvas({ playerName }) {
     zoomTarget: 1,      // zoom level we're animating toward
     resetting: false,   // true while auto-reset animation is running
     npc: null,          // lazy-initialized janitor bot
+    parkObstacles: [],  // collidable park objects around spawn (trees, bushes, rocks, stumps, logs)
+    parkDecor: [],      // non-collidable decor (pond, mushrooms, ferns, flowers, dirt patches, fireflies)
   })
   const rafRef     = useRef(null)
   const zoomReset  = useRef(null)
@@ -350,8 +768,12 @@ export default function GameCanvas({ playerName }) {
     sendRef.current = (text) => sendWS({ event: 'message', text })
 
     ws.onopen = () => {
-      const x = 100 + Math.random() * (window.innerWidth - 200)
-      const y = window.innerHeight - 130
+      // Spawn scattered within the shared clearing (the empty center cells
+      // of PARK_OBSTACLES) so every client's park layout lines up.
+      const x = (Math.random() - 0.5) * (PARK_CELL * 1.4)
+      const y = (Math.random() - 0.5) * (PARK_CELL * 1.4)
+      s.parkObstacles = PARK_OBSTACLES
+      s.parkDecor = PARK_DECOR
       sendWS({ event: 'join', name: playerName, x, y })
       setConnected(true)
     }
@@ -551,19 +973,9 @@ export default function GameCanvas({ playerName }) {
     const render = () => {
       ctx.imageSmoothingEnabled = false
 
-      // Background
-      ctx.fillStyle = '#0a0a0a'
+      // Ground — visible forest-floor green instead of flat black
+      ctx.fillStyle = '#1c3018'
       ctx.fillRect(0, 0, canvas.width, canvas.height)
-
-      // Subtle pixel dot grid
-      ctx.fillStyle = 'rgba(255,255,255,0.025)'
-      for (let gx = 0; gx < canvas.width; gx += P * 8)
-        for (let gy = 0; gy < canvas.height; gy += P * 8)
-          ctx.fillRect(gx, gy, P, P)
-
-      // Floor (screen-space — always anchored to bottom of viewport)
-      ctx.fillStyle = 'rgba(255,255,255,0.07)'
-      ctx.fillRect(0, canvas.height - P * 2, canvas.width, P)
 
       if (s.myId && s.players[s.myId]) {
         const p = s.players[s.myId]
@@ -605,6 +1017,26 @@ export default function GameCanvas({ playerName }) {
       ctx.translate(-canvas.width / 2, -canvas.height / 2)
       ctx.translate(-Math.round(s.camX), -Math.round(s.camY))
 
+      // ── Flat ground decor (pond, dirt patches, mushrooms, ferns, flowers) ──
+      // Drawn early since these are too low-profile to need occlusion
+      // sorting against players. Fireflies are drawn later, on top.
+      {
+        const viewCX  = s.camX + canvas.width  / 2
+        const viewCY  = s.camY + canvas.height / 2
+        const marginX = canvas.width  / (2 * s.zoom) + 150
+        const marginY = canvas.height / (2 * s.zoom) + 150
+        for (const o of s.parkDecor) {
+          if (o.type === 'firefly') continue  // drawn later, on top
+          if (Math.abs(o.cx - viewCX) > marginX || Math.abs(o.cy - viewCY) > marginY) continue
+          if (o.type === 'pond') drawPond(ctx, o)
+          else if (o.type === 'grass') drawGrassTuft(ctx, o)
+          else if (o.type === 'dirt') drawDirtPatch(ctx, o)
+          else if (o.type === 'mushroom') drawMushroom(ctx, o)
+          else if (o.type === 'fern') drawFern(ctx, o)
+          else if (o.type === 'flower') drawFlower(ctx, o)
+        }
+      }
+
       // ── Move local player toward click target ──
       if (s.moveTarget && s.myId && s.players[s.myId]) {
         const p  = s.players[s.myId]
@@ -612,18 +1044,36 @@ export default function GameCanvas({ playerName }) {
         const dy = s.moveTarget.y - p.y
         const dist = Math.sqrt(dx * dx + dy * dy)
 
-        if (dist < SPEED) {
+        // Swimming — standing in water slows movement instead of blocking it
+        const speed = isInAnyPond(s.parkDecor, p.x, p.y) ? SPEED * 0.35 : SPEED
+
+        if (dist < speed) {
           // Arrived
-          p.x = s.moveTarget.x
-          p.y = s.moveTarget.y
+          if (!isBlocked(s.moveTarget.x, s.moveTarget.y, s.parkObstacles)) {
+            p.x = s.moveTarget.x
+            p.y = s.moveTarget.y
+          }
           s.moveTarget = null
           s.walkTick   = 0
           sendWS({ event: 'move', x: p.x, y: p.y })
         } else {
-          // Step toward target
+          // Step toward target, sliding along walls on collision
           if (dx !== 0) s.facingDir = dx > 0 ? 1 : -1
-          p.x += (dx / dist) * SPEED
-          p.y += (dy / dist) * SPEED
+          const stepX = (dx / dist) * speed
+          const stepY = (dy / dist) * speed
+          const nx = p.x + stepX
+          const ny = p.y + stepY
+
+          if (!isBlocked(nx, ny, s.parkObstacles)) {
+            p.x = nx; p.y = ny
+          } else if (!isBlocked(nx, p.y, s.parkObstacles)) {
+            p.x = nx  // slide horizontally along the wall
+          } else if (!isBlocked(p.x, ny, s.parkObstacles)) {
+            p.y = ny  // slide vertically along the wall
+          } else {
+            // Fully boxed in — stop trying toward this target
+            s.moveTarget = null
+          }
           s.walkTick++
 
           // Throttle WS to ~30fps
@@ -635,49 +1085,7 @@ export default function GameCanvas({ playerName }) {
         }
       }
 
-      // ── Target marker ──
-      if (s.moveTarget) drawTarget(ctx, s.moveTarget.x, s.moveTarget.y)
-
-      // ── Pile (natural scattered layout) ──
-      for (const item of s.pile) {
-        const pos = s.pileLayout.get(item.id)
-        if (pos) drawPileItem(ctx, pos.x, pos.y, item.text, pos.angle)
-      }
-
-      // ── Falling balloons ──
-      const toDelete = []
-      for (const [bid, fb] of Object.entries(s.falling)) {
-        // Advance along a straight line using shared progress (no spiral)
-        fb.progress = Math.min(1, fb.progress + 0.018)
-        const t = fb.progress * fb.progress  // ease-in: accelerates like gravity
-        fb.currentX = fb.startX + (fb.targetX - fb.startX) * t
-        fb.currentY = fb.startY + (fb.targetY - fb.startY) * t
-        fb.angle    = fb.maxAngle * fb.progress
-        drawBalloon(ctx, fb.currentX, fb.currentY, fb.player_id, false, fb.angle)
-        if (fb.progress >= 1) {
-          if (fb.pile_item) {
-            s.pile.push(fb.pile_item)
-            placePileItem(fb.pile_item, s.pileLayout, fb.targetX, fb.targetY)
-          }
-          toDelete.push(bid)
-        }
-      }
-      for (const bid of toDelete) delete s.falling[bid]
-
-      // ── Floating balloons (bubble always visible, outline appears on hover) ──
-      const now = Date.now()
-      for (const b of Object.values(s.balloons)) {
-        b.floatY -= 0.35
-        // Auto-pop after 20 seconds
-        if (now - b.createdAt >= 20000) {
-          sendWS({ event: 'pop', balloon_id: b.id })
-          continue
-        }
-        drawBalloon(ctx, b.x, b.floatY, b.player_id, s.hoveredBalloon === b.id)
-        drawHoverBubble(ctx, b.x, b.floatY, b.text, b.player_id)
-      }
-
-      // ── Janitor NPC ──
+      // ── Janitor NPC (position/logic only — drawn in the y-sorted pass below) ──
       const NPC_SPEED    = 1.0
       const NPC_PICKUP_R = 12
 
@@ -732,16 +1140,42 @@ export default function GameCanvas({ playerName }) {
             }
           }
         }
-
-        const npcMoving = !!npc.targetId && npc.pickupPause === 0
-        const npcFrame  = npcMoving ? Math.floor(npc.walkTick / 6) % 4 : 0
-        drawStickman(ctx, npc.x, npc.y, 'Jani', false, 'npc-janitor', npcFrame, npc.facingDir, !npcMoving)
       }
 
-      // ── Stickmen ──
-      // 4-frame cycle: 6 game-frames per animation-frame = ~10 steps/sec at 60fps
-      const myMoving = !!s.moveTarget
-      const myWalkFrame = myMoving ? Math.floor(s.walkTick / 6) % 4 : 0
+      // ── Y-sorted ground layer: trees, bushes, NPC, players ──
+      // Draw order follows each entity's ground y so nearer things (larger y)
+      // draw over farther things (smaller y) — this is what lets a tree
+      // correctly hide a player standing behind it, and vice versa.
+      const myMoving     = !!s.moveTarget
+      const myWalkFrame  = myMoving ? Math.floor(s.walkTick / 6) % 4 : 0
+      const groundLayer  = []
+
+      // Viewport culling — with a large scattered world, most obstacles are
+      // off-screen at any moment. Only draw the ones near the visible area
+      // (plus a margin so tall canopies don't pop in right at the edge).
+      const viewCX = s.camX + canvas.width  / 2
+      const viewCY = s.camY + canvas.height / 2
+      const marginX = canvas.width  / (2 * s.zoom) + 150
+      const marginY = canvas.height / (2 * s.zoom) + 150
+
+      const OBSTACLE_DRAW = { tree: drawTree, bush: drawBush, rock: drawRock, stump: drawStump, log: drawLog }
+      for (const o of s.parkObstacles) {
+        if (o.type === 'pond') continue  // already drawn in the flat decor pass
+        if (Math.abs(o.cx - viewCX) > marginX || Math.abs(o.cy - viewCY) > marginY) continue
+        const drawFn = OBSTACLE_DRAW[o.type]
+        groundLayer.push({ y: o.cy, draw: () => drawFn(ctx, o) })
+      }
+
+      if (s.npc) {
+        const npc = s.npc
+        const npcMoving = !!npc.targetId && npc.pickupPause === 0
+        const npcFrame  = npcMoving ? Math.floor(npc.walkTick / 6) % 4 : 0
+        groundLayer.push({
+          y: npc.y,
+          draw: () => drawStickman(ctx, npc.x, npc.y, 'Jani', false, 'npc-janitor', npcFrame, npc.facingDir, !npcMoving),
+        })
+      }
+
       for (const p of Object.values(s.players)) {
         const isMe = p.id === s.myId
         let frame, dir, idle
@@ -755,7 +1189,62 @@ export default function GameCanvas({ playerName }) {
           frame = moving ? Math.floor(Date.now() / 100) % 4 : 0
           dir   = p.facingDir ?? 1
         }
-        drawStickman(ctx, p.x, p.y, p.name, isMe, p.id, frame, dir, idle)
+        groundLayer.push({ y: p.y, draw: () => drawStickman(ctx, p.x, p.y, p.name, isMe, p.id, frame, dir, idle) })
+      }
+
+      groundLayer.sort((a, b) => a.y - b.y)
+      for (const entry of groundLayer) entry.draw()
+
+      // ── Target marker ──
+      if (s.moveTarget) drawTarget(ctx, s.moveTarget.x, s.moveTarget.y)
+
+      // ── Pile (natural scattered layout) ──
+      for (const item of s.pile) {
+        const pos = s.pileLayout.get(item.id)
+        if (pos) drawPileItem(ctx, pos.x, pos.y, item.text, pos.angle)
+      }
+
+      // ── Falling balloons ──
+      const toDelete = []
+      for (const [bid, fb] of Object.entries(s.falling)) {
+        // Advance along a straight line using shared progress (no spiral)
+        fb.progress = Math.min(1, fb.progress + 0.018)
+        const t = fb.progress * fb.progress  // ease-in: accelerates like gravity
+        fb.currentX = fb.startX + (fb.targetX - fb.startX) * t
+        fb.currentY = fb.startY + (fb.targetY - fb.startY) * t
+        fb.angle    = fb.maxAngle * fb.progress
+        drawBalloon(ctx, fb.currentX, fb.currentY, fb.player_id, false, fb.angle)
+        if (fb.progress >= 1) {
+          if (fb.pile_item) {
+            s.pile.push(fb.pile_item)
+            placePileItem(fb.pile_item, s.pileLayout, fb.targetX, fb.targetY)
+          }
+          toDelete.push(bid)
+        }
+      }
+      for (const bid of toDelete) delete s.falling[bid]
+
+      // ── Floating balloons (bubble always visible, outline appears on hover) ──
+      const now = Date.now()
+      for (const b of Object.values(s.balloons)) {
+        b.floatY -= 0.35
+        // Auto-pop after 20 seconds
+        if (now - b.createdAt >= 20000) {
+          sendWS({ event: 'pop', balloon_id: b.id })
+          continue
+        }
+        drawBalloon(ctx, b.x, b.floatY, b.player_id, s.hoveredBalloon === b.id)
+        drawHoverBubble(ctx, b.x, b.floatY, b.text, b.player_id)
+      }
+
+      // ── Fireflies (ambient, animated, drawn on top of everything) ──
+      {
+        const t = Date.now() / 1000
+        for (const o of s.parkDecor) {
+          if (o.type !== 'firefly') continue
+          if (Math.abs(o.cx - viewCX) > marginX || Math.abs(o.cy - viewCY) > marginY) continue
+          drawFirefly(ctx, o, t)
+        }
       }
 
       ctx.restore() // end camera transform

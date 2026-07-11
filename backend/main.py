@@ -212,6 +212,10 @@ async def ws_endpoint(websocket: WebSocket):
                     await broadcast({"event": "pile_item_cleaned", "pile_item_id": pile_item_id})
 
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass  # any other abrupt disconnect (reset, cancellation, etc.)
+    finally:
         connections.pop(conn_id, None)
         players.pop(conn_id, None)
         await broadcast({"event": "player_left", "player_id": conn_id})

@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "frontend",
+      "port": 3001
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "backend/venv/bin/uvicorn",
+      "runtimeArgs": ["main:app", "--reload", "--reload-exclude", "venv/*", "--port", "8001"],
+      "port": 8001
+    }
+  ]
+}
