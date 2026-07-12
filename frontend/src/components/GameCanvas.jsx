@@ -59,19 +59,12 @@ export default function GameCanvas({ playerName }) {
     const ctx    = canvas.getContext('2d')
     const s      = stateRef.current
 
-    // iOS Safari doesn't reliably fire a correct 'resize' on window when the
-    // on-screen keyboard closes — window.innerHeight can be left stale,
-    // leaving a black gap where the keyboard used to be. visualViewport
-    // tracks what's actually visible (accounting for the keyboard) and
-    // fires its own 'resize' event reliably in that case, so prefer it.
-    const vv = window.visualViewport
     const resize = () => {
-      canvas.width  = vv ? vv.width  : window.innerWidth
-      canvas.height = vv ? vv.height : window.innerHeight
+      canvas.width  = window.innerWidth
+      canvas.height = window.innerHeight
     }
     resize()
-    if (vv) vv.addEventListener('resize', resize)
-    else window.addEventListener('resize', resize)
+    window.addEventListener('resize', resize)
 
     // ── WebSocket ──
     const ws = new WebSocket(WS_URL)
@@ -672,8 +665,7 @@ export default function GameCanvas({ playerName }) {
       window.removeEventListener('beforeunload', onBeforeUnload)
       window.removeEventListener('pagehide', onBeforeUnload)
       document.removeEventListener('visibilitychange', onVisibilityChange)
-      if (vv) vv.removeEventListener('resize', resize)
-      else window.removeEventListener('resize', resize)
+      window.removeEventListener('resize', resize)
       window.removeEventListener('keydown', onKeyDown)
       canvas.removeEventListener('mousedown', onMouseDown)
       canvas.removeEventListener('mousemove', onMouseMove)
@@ -688,7 +680,7 @@ export default function GameCanvas({ playerName }) {
   }, [playerName, sendWS])
 
   return (
-    <div style={{ position: 'fixed', inset: 0 }}>
+    <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
       <canvas ref={canvasRef} style={{ display: 'block', imageRendering: 'pixelated', touchAction: 'none' }} />
       {!connected && (
         <div
