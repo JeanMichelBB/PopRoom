@@ -1,6 +1,7 @@
 import { P, PARK_CELL, PARK_EXTENT, PLAYER_R } from '../constants'
 import { seededRand, hash2D } from '../rng'
 import { isOutsideIsland } from './island'
+import { BOULDER_RADIUS } from './boulders'
 
 // ── Park background (trees, bushes, rocks, stumps, logs, pond — all
 // collidable — plus non-collidable decor: mushrooms, ferns, flowers, dirt
@@ -77,7 +78,6 @@ export function buildParkObstacles(originX, originY) {
       if (Math.abs(gx) <= 1 && Math.abs(gy) <= 1) continue  // spawn clearing
       const seed = `park_${gx}_${gy}`
       const r = seededRand(seed)
-      if (r < 0.45) continue  // most cells stay empty grass
 
       const jx = (seededRand(seed + 'jx') - 0.5) * (PARK_CELL * 0.95)
       const jy = (seededRand(seed + 'jy') - 0.5) * (PARK_CELL * 0.95)
@@ -86,6 +86,19 @@ export function buildParkObstacles(originX, originY) {
 
       if (nearAnyPond(cx, cy)) continue  // keep pond edges clear
       if (isOutsideIsland(cx, cy)) continue  // no forest content out in the ocean
+
+      if (r < 0.45) {
+        // Empty cell — no tree/bush here. Small chance of a boulder instead,
+        // in a few different sizes, so open clearings aren't totally bare.
+        const boulderRoll = seededRand(seed + 'boulder')
+        if (boulderRoll > 0.88) {
+          const sizeRoll = seededRand(seed + 'boulderSize')
+          const size = sizeRoll < 0.45 ? 'small' : sizeRoll < 0.8 ? 'medium' : 'large'
+          const br = BOULDER_RADIUS[size]
+          obstacles.push({ type: 'boulder', size, cx, cy, seed, x: cx - br, y: cy - br, w: br * 2, h: br * 2 })
+        }
+        continue
+      }
 
       // r in (0.45, 1.0]: tree 38% / bush 7% / rock 3% / stump 2% / log 1.5%
       // / mushroom 1% / fern 1% / flower 1.5% (decor)
@@ -151,6 +164,47 @@ export function buildParkObstacles(originX, originY) {
         cx: fcx,
         cy: fcy,
         phase: seededRand(seed + 'phase') * Math.PI * 2,
+      })
+    }
+  }
+
+  // ── Rabbits — ambient wildlife, ground-only, no collision. Home points
+  // stay on land so they don't hop out into the ocean. ──
+  const RABBIT_BLOCK = PARK_CELL * 4
+  const rabbitRange  = Math.ceil(WORLD_EDGE / RABBIT_BLOCK) + 1
+  for (let by = -rabbitRange; by <= rabbitRange; by++) {
+    for (let bx = -rabbitRange; bx <= rabbitRange; bx++) {
+      const seed = `rabbit_${bx}_${by}`
+      if (hash2D(bx, by, 41) > 0.12) continue  // ~12% of blocks get a rabbit
+      const jx = (hash2D(bx, by, 42) - 0.5) * RABBIT_BLOCK
+      const jy = (hash2D(bx, by, 43) - 0.5) * RABBIT_BLOCK
+      const rcx = originX + bx * RABBIT_BLOCK + jx
+      const rcy = originY + by * RABBIT_BLOCK + jy
+      if (Math.abs(rcx - originX) > WORLD_EDGE || Math.abs(rcy - originY) > WORLD_EDGE) continue
+      if (isOutsideIsland(rcx, rcy)) continue  // rabbits stay on land
+      decor.push({
+        type: 'rabbit', seed,
+        cx: rcx, cy: rcy,
+        phase: seededRand(seed + 'phase') * 10,
+      })
+    }
+  }
+
+  // ── Birds — ambient wildlife, fly in slow loops, no exclusion so they
+  // can cross open water too. ──
+  const BIRD_BLOCK = PARK_CELL * 9
+  const birdRange  = Math.ceil(WORLD_EDGE / BIRD_BLOCK) + 1
+  for (let by = -birdRange; by <= birdRange; by++) {
+    for (let bx = -birdRange; bx <= birdRange; bx++) {
+      const seed = `bird_${bx}_${by}`
+      if (hash2D(bx, by, 51) > 0.1) continue  // ~10% of blocks get a bird
+      const jx = (hash2D(bx, by, 52) - 0.5) * BIRD_BLOCK
+      const jy = (hash2D(bx, by, 53) - 0.5) * BIRD_BLOCK
+      decor.push({
+        type: 'bird', seed,
+        cx: originX + bx * BIRD_BLOCK + jx,
+        cy: originY + by * BIRD_BLOCK + jy,
+        phase: seededRand(seed + 'phase') * 10,
       })
     }
   }

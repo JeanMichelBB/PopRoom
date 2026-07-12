@@ -10,8 +10,10 @@ import { drawBush } from '../game/park/bushes'
 import { drawRock } from '../game/park/rocks'
 import { drawStump } from '../game/park/stumps'
 import { drawLog } from '../game/park/logs'
+import { drawBoulder } from '../game/park/boulders'
 import { drawPond, isInAnyPond } from '../game/park/pond'
 import { drawMushroom, drawGrassTuft, drawFern, drawFlower, drawDirtPatch, drawFirefly } from '../game/park/decor'
+import { createRabbitState, updateRabbit, drawRabbitAt, drawBird } from '../game/park/wildlife'
 import { PARK_OBSTACLES, PARK_DECOR, isBlocked } from '../game/park/generate'
 import { isOutsideIsland, drawOceanMask, drawCliffMask } from '../game/park/island'
 
@@ -40,6 +42,7 @@ export default function GameCanvas({ playerName }) {
     npc: null,          // lazy-initialized janitor bot
     parkObstacles: [],  // collidable park objects around spawn (trees, bushes, rocks, stumps, logs)
     parkDecor: [],      // non-collidable decor (pond, mushrooms, ferns, flowers, dirt patches, fireflies)
+    rabbits: [],        // live per-frame rabbit state — separate from parkDecor since they react to the player
   })
   const rafRef     = useRef(null)
   const zoomReset  = useRef(null)
@@ -56,12 +59,19 @@ export default function GameCanvas({ playerName }) {
     const ctx    = canvas.getContext('2d')
     const s      = stateRef.current
 
+    // iOS Safari doesn't reliably fire a correct 'resize' on window when the
+    // on-screen keyboard closes — window.innerHeight can be left stale,
+    // leaving a black gap where the keyboard used to be. visualViewport
+    // tracks what's actually visible (accounting for the keyboard) and
+    // fires its own 'resize' event reliably in that case, so prefer it.
+    const vv = window.visualViewport
     const resize = () => {
-      canvas.width  = window.innerWidth
-      canvas.height = window.innerHeight
+      canvas.width  = vv ? vv.width  : window.innerWidth
+      canvas.height = vv ? vv.height : window.innerHeight
     }
     resize()
-    window.addEventListener('resize', resize)
+    if (vv) vv.addEventListener('resize', resize)
+    else window.addEventListener('resize', resize)
 
     // ── WebSocket ──
     const ws = new WebSocket(WS_URL)
@@ -89,6 +99,9 @@ export default function GameCanvas({ playerName }) {
       }
       s.parkObstacles = PARK_OBSTACLES
       s.parkDecor = PARK_DECOR
+      // Rabbits need live per-frame state (to flee from the player) unlike
+      // the rest of the decor, so pull them out into their own list once.
+      s.rabbits = PARK_DECOR.filter(o => o.type === 'rabbit').map(createRabbitState)
       // Center the camera on the spawn point immediately so a reload doesn't
       // start at world origin and visibly race across the map to catch up.
       s.camX = x - canvas.width  / 2
@@ -101,12 +114,24 @@ export default function GameCanvas({ playerName }) {
     // reload can resume from the same spot instead of a fresh random one.
     // Same for the janitor NPC — otherwise it respawns next to the player
     // on every reload instead of staying wherever it wandered off to.
+    //
+    // 'beforeunload' alone isn't enough — iOS Safari doesn't reliably fire
+    // it when the app is backgrounded, the tab is swiped away, or the OS
+    // just suspends the page, which is how people actually leave a page on
+    // a phone (rarely an explicit reload). 'visibilitychange' (fires when
+    // the page becomes hidden) and 'pagehide' are much more reliable there,
+    // so we save on all three.
     const onBeforeUnload = () => {
       const p = s.players[s.myId]
       if (p) localStorage.setItem(POS_KEY, JSON.stringify({ x: p.x, y: p.y }))
       if (s.npc) localStorage.setItem(NPC_POS_KEY, JSON.stringify({ x: s.npc.x, y: s.npc.y }))
     }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') onBeforeUnload()
+    }
     window.addEventListener('beforeunload', onBeforeUnload)
+    window.addEventListener('pagehide', onBeforeUnload)
+    document.addEventListener('visibilitychange', onVisibilityChange)
 
     ws.onmessage = (e) => {
       const msg = JSON.parse(e.data)
@@ -374,7 +399,7 @@ export default function GameCanvas({ playerName }) {
         // paying for thousands of fillRect calls nobody can see.
         const showFineDecor = s.zoom >= 0.5
         for (const o of s.parkDecor) {
-          if (o.type === 'firefly') continue  // drawn later, on top
+          if (o.type === 'firefly' || o.type === 'bird' || o.type === 'rabbit') continue  // drawn separately
           if (Math.abs(o.cx - viewCX) > marginX || Math.abs(o.cy - viewCY) > marginY) continue
           if (o.type === 'pond') { drawPond(ctx, o); continue }
           if (!showFineDecor) continue
@@ -383,6 +408,23 @@ export default function GameCanvas({ playerName }) {
           else if (o.type === 'mushroom') drawMushroom(ctx, o)
           else if (o.type === 'fern') drawFern(ctx, o)
           else if (o.type === 'flower') drawFlower(ctx, o)
+        }
+      }
+
+      // ── Rabbits — live state, updated every frame so they can flee the
+      // local player when approached, then drawn if on screen. ──
+      if (s.rabbits.length) {
+        const nowSec = Date.now() / 1000
+        const me = s.myId ? s.players[s.myId] : null
+        const px = me ? me.x : null, py = me ? me.y : null
+        const viewCX  = s.camX + canvas.width  / 2
+        const viewCY  = s.camY + canvas.height / 2
+        const marginX = canvas.width  / (2 * s.zoom) + 150
+        const marginY = canvas.height / (2 * s.zoom) + 150
+        for (const r of s.rabbits) {
+          updateRabbit(r, nowSec, px, py)
+          if (Math.abs(r.x - viewCX) > marginX || Math.abs(r.y - viewCY) > marginY) continue
+          drawRabbitAt(ctx, r)
         }
       }
 
@@ -522,7 +564,7 @@ export default function GameCanvas({ playerName }) {
       const marginX = canvas.width  / (2 * s.zoom) + 150
       const marginY = canvas.height / (2 * s.zoom) + 150
 
-      const OBSTACLE_DRAW = { tree: drawTree, bush: drawBush, rock: drawRock, stump: drawStump, log: drawLog }
+      const OBSTACLE_DRAW = { tree: drawTree, bush: drawBush, rock: drawRock, stump: drawStump, log: drawLog, boulder: drawBoulder }
       for (const o of s.parkObstacles) {
         if (o.type === 'pond') continue  // already drawn in the flat decor pass
         if (Math.abs(o.cx - viewCX) > marginX || Math.abs(o.cy - viewCY) > marginY) continue
@@ -601,13 +643,18 @@ export default function GameCanvas({ playerName }) {
         drawHoverBubble(ctx, b.x, b.floatY, b.text, b.player_id)
       }
 
-      // ── Fireflies (ambient, animated, drawn on top of everything) ──
+      // ── Fireflies + birds (ambient, animated, drawn on top of everything) ──
       {
         const t = Date.now() / 1000
+        const birdMarginX = marginX + 220, birdMarginY = marginY + 220  // birds wander further from home than the usual culling margin
         for (const o of s.parkDecor) {
-          if (o.type !== 'firefly') continue
-          if (Math.abs(o.cx - viewCX) > marginX || Math.abs(o.cy - viewCY) > marginY) continue
-          drawFirefly(ctx, o, t)
+          if (o.type === 'firefly') {
+            if (Math.abs(o.cx - viewCX) > marginX || Math.abs(o.cy - viewCY) > marginY) continue
+            drawFirefly(ctx, o, t)
+          } else if (o.type === 'bird') {
+            if (Math.abs(o.cx - viewCX) > birdMarginX || Math.abs(o.cy - viewCY) > birdMarginY) continue
+            drawBird(ctx, o, t)
+          }
         }
       }
 
@@ -623,7 +670,10 @@ export default function GameCanvas({ playerName }) {
     return () => {
       onBeforeUnload()  // also save on unmount, not just full page reload
       window.removeEventListener('beforeunload', onBeforeUnload)
-      window.removeEventListener('resize', resize)
+      window.removeEventListener('pagehide', onBeforeUnload)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      if (vv) vv.removeEventListener('resize', resize)
+      else window.removeEventListener('resize', resize)
       window.removeEventListener('keydown', onKeyDown)
       canvas.removeEventListener('mousedown', onMouseDown)
       canvas.removeEventListener('mousemove', onMouseMove)
@@ -638,7 +688,7 @@ export default function GameCanvas({ playerName }) {
   }, [playerName, sendWS])
 
   return (
-    <div style={{ position: 'relative', width: '100vw', height: '100vh' }}>
+    <div style={{ position: 'fixed', inset: 0 }}>
       <canvas ref={canvasRef} style={{ display: 'block', imageRendering: 'pixelated', touchAction: 'none' }} />
       {!connected && (
         <div
