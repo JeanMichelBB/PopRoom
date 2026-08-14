@@ -24,6 +24,8 @@ A real-time multiplayer shared canvas where users control pixel-art stickmen, se
 | Database | MySQL 8.0                   |
 | Infra    | Docker + Docker Compose     |
 
+In production, this app connects to a shared MySQL instance — see [`shared-mysql`](https://github.com/JeanMichelBB/shared-mysql). It doesn't run its own database in k3s.
+
 ## Getting Started
 
 ### Prerequisites
