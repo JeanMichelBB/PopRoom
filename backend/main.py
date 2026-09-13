@@ -7,6 +7,8 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import Gauge
+from prometheus_fastapi_instrumentator import Instrumentator
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -61,6 +63,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+Instrumentator().instrument(app).expose(app, include_in_schema=False)
+
+active_players = Gauge("poproom_active_players", "Number of players currently joined")
+active_players.set_function(lambda: len(players))
+
+active_connections = Gauge("poproom_active_connections", "Number of open websocket connections")
+active_connections.set_function(lambda: len(connections))
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
 
 
 async def broadcast(message: dict, exclude_id: str = None):
