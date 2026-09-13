@@ -6,3 +6,7 @@ python-dotenv==1.0.1
 cryptography==43.0.1
 websockets==13.1
 prometheus-fastapi-instrumentator
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-grpc
+opentelemetry-instrumentation-fastapi
+opentelemetry-instrumentation-sqlalchemy

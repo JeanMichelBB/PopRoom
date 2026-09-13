@@ -9,7 +9,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import Gauge
 from prometheus_fastapi_instrumentator import Instrumentator
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from dotenv import load_dotenv
+from tracing import setup_tracing
 
 load_dotenv()
 
@@ -65,6 +67,9 @@ app.add_middleware(
 )
 
 Instrumentator().instrument(app).expose(app, include_in_schema=False)
+
+setup_tracing("poproom", engine=engine)
+FastAPIInstrumentor.instrument_app(app)
 
 active_players = Gauge("poproom_active_players", "Number of players currently joined")
 active_players.set_function(lambda: len(players))
