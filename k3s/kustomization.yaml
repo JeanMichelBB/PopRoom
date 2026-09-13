@@ -9,8 +9,8 @@ resources:
 
 images:
   - name: jeanmichelbb/poproom-fe
-    newTag: b2e3674690b2def3e2b5e3018c762380207fd1aa
+    newTag: fd93117dc573d1dce81d9585311a1197b5ab770d
     newName: jeanmichelbb/poproom-fe
   - name: jeanmichelbb/poproom-be
-    newTag: b2e3674690b2def3e2b5e3018c762380207fd1aa
+    newTag: fd93117dc573d1dce81d9585311a1197b5ab770d
     newName: jeanmichelbb/poproom-be
