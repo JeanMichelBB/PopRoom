@@ -31,7 +31,9 @@ jobs:
           context: ./frontend
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: jeanmichelbb/poproom-fe:latest
+          tags: |
+            jeanmichelbb/poproom-fe:latest
+            jeanmichelbb/poproom-fe:${{ github.sha }}
           build-args: VITE_WS_URL=${{ secrets.VITE_WS_URL }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
@@ -67,7 +69,9 @@ jobs:
           context: ./backend
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: jeanmichelbb/poproom-be:latest
+          tags: |
+            jeanmichelbb/poproom-be:latest
+            jeanmichelbb/poproom-be:${{ github.sha }}
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
