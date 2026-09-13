@@ -5,3 +5,10 @@ resources:
   - backend-deployment.yaml
   - frontend-deployment.yaml
   - ingress.yaml
+  - image-updater.yaml
+
+images:
+  - name: jeanmichelbb/poproom-fe
+    newTag: latest
+  - name: jeanmichelbb/poproom-be
+    newTag: latest

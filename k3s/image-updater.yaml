@@ -1,0 +1,30 @@
+apiVersion: argocd-image-updater.argoproj.io/v1alpha1
+kind: ImageUpdater
+metadata:
+  name: poproom
+  namespace: argocd
+spec:
+  applicationRefs:
+    - namePattern: poproom
+      images:
+        - alias: frontend
+          imageName: jeanmichelbb/poproom-fe
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            kustomize:
+              name: jeanmichelbb/poproom-fe
+        - alias: backend
+          imageName: jeanmichelbb/poproom-be
+          commonUpdateSettings:
+            updateStrategy: newest-build
+            allowTags: "regexp:^[0-9a-f]{40}$"
+          manifestTargets:
+            kustomize:
+              name: jeanmichelbb/poproom-be
+      writeBackConfig:
+        method: "git:secret:argocd/git-creds-github"
+        gitConfig:
+          branch: main
+          writeBackTarget: "kustomization:."
