@@ -12,5 +12,5 @@ images:
     newTag: fd93117dc573d1dce81d9585311a1197b5ab770d
     newName: jeanmichelbb/poproom-fe
   - name: jeanmichelbb/poproom-be
-    newTag: ae8ee285dc85f9fde1b5f1fe963d79dd1edcc93a
+    newTag: 89beb5752e2a68fe4e976d1bbfa57f7f630d3c23
     newName: jeanmichelbb/poproom-be
