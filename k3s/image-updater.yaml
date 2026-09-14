@@ -10,16 +10,16 @@ spec:
         - alias: frontend
           imageName: jeanmichelbb/poproom-fe
           commonUpdateSettings:
-            updateStrategy: newest-build
-            allowTags: "regexp:^[0-9a-f]{40}$"
+            updateStrategy: alphabetical
+            allowTags: "regexp:^[0-9]{10}-[0-9a-f]{40}$"
           manifestTargets:
             kustomize:
               name: jeanmichelbb/poproom-fe
         - alias: backend
           imageName: jeanmichelbb/poproom-be
           commonUpdateSettings:
-            updateStrategy: newest-build
-            allowTags: "regexp:^[0-9a-f]{40}$"
+            updateStrategy: alphabetical
+            allowTags: "regexp:^[0-9]{10}-[0-9a-f]{40}$"
           manifestTargets:
             kustomize:
               name: jeanmichelbb/poproom-be
