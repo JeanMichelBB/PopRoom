@@ -34,6 +34,7 @@ export default function JoinScreen({ onJoin, savedName = '' }) {
           onChange={e => setName(e.target.value)}
           maxLength={20}
           autoFocus
+          className="join-input"
           style={{
             background: '#111', border: '3px solid #2a2a2a',
             color: '#fff', padding: '12px 18px',
