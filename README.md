@@ -14,6 +14,7 @@ A real-time multiplayer shared canvas where users control pixel-art stickmen, se
 - **Multiplayer** — all players see each other in real time via WebSockets
 - **Persistent pile** — the balloon pile is saved to MySQL so new users see it when they join
 - **Auto-rejoin** — name is saved in localStorage, skips the join screen on reload
+- **Procedural island park** — deterministic, seeded scenery (trees, bushes, rocks, stumps, logs, a pond, ambient decor, wildlife) scattered around spawn with a clearing left open, plus an island/ocean/cliff mask at the edges
 
 ## Stack
 
@@ -25,6 +26,8 @@ A real-time multiplayer shared canvas where users control pixel-art stickmen, se
 | Infra    | Docker + Docker Compose     |
 
 In production, this app connects to a shared MySQL instance — see [`shared-mysql`](https://github.com/JeanMichelBB/shared-mysql). It doesn't run its own database in k3s.
+
+Backend also exposes Prometheus metrics (`/metrics`) via `prometheus-fastapi-instrumentator`, and ships OpenTelemetry traces (FastAPI + SQLAlchemy spans) over OTLP/gRPC when `TAILSCALE_IP_TSPI` is set — a no-op in local dev (`backend/tracing.py`).
 
 ## Getting Started
 
@@ -39,7 +42,24 @@ In production, this app connects to a shared MySQL instance — see [`shared-mys
 ```bash
 git clone https://github.com/JeanMichelBB/PopRoom.git
 cd PopRoom
-cp .env.example .env   # edit credentials if needed
+```
+
+Create a `.env` in the repo root (there's no `.env.example` checked in — `.env` is gitignored) with:
+
+```bash
+DB_HOST=localhost
+DB_PORT=3306
+DB_ROOT_PASSWORD=<root password>
+DB_NAME=poproom
+DB_USER=poproom
+DB_PASSWORD=<password>
+
+VITE_WS_URL=ws://<host>:8001/ws
+```
+
+Then:
+
+```bash
 docker-compose up --build
 ```
 
@@ -62,6 +82,15 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 8001
 ```
 
+### Tests
+
+```bash
+cd backend
+pytest
+```
+
+Tests run against an in-memory SQLite engine (swapped in via `tests/conftest.py`) — no live MySQL needed.
+
 ## WebSocket Protocol
 
 | Direction        | Event            | Payload                                    |
@@ -83,20 +112,37 @@ uvicorn main:app --reload --port 8001
 PopRoom/
 ├── docker-compose.yml
 ├── .env
+├── .github/workflows/deploy.yml   # CI: build, scan, push Docker images
+├── k3s/                           # Kustomize manifests for k3s deployment
 ├── backend/
-│   ├── main.py               # WebSocket server, in-memory game state
+│   ├── main.py                    # WebSocket server, in-memory game state
+│   ├── tracing.py                 # OpenTelemetry setup (no-op locally)
 │   ├── database/
-│   │   ├── connection.py     # SQLAlchemy engine
-│   │   └── models.py         # PoppedBalloon table
+│   │   ├── connection.py          # SQLAlchemy engine
+│   │   └── models.py              # PoppedBalloon table
+│   ├── tests/                     # pytest suite (in-memory SQLite)
 │   └── requirements.txt
 └── frontend/
     └── src/
         ├── App.jsx
-        └── components/
-            ├── JoinScreen.jsx
-            ├── GameCanvas.jsx  # Canvas loop, stickmen, balloons, pile
-            └── MessageInput.jsx
+        ├── global.css
+        ├── components/
+        │   ├── JoinScreen.jsx
+        │   ├── GameCanvas.jsx     # Canvas loop, stickmen, balloons, pile
+        │   └── MessageInput.jsx
+        └── game/                  # Canvas draw/update logic, framework-free
+            ├── stickman.js, balloon.js, pile.js, target.js
+            ├── pixel.js, rng.js, constants.js
+            └── park/              # Procedural island scenery
+                ├── generate.js, island.js
+                ├── trees.js, bushes.js, rocks.js, stumps.js, logs.js
+                ├── boulders.js, pond.js, decor.js, wildlife.js
 ```
+
+## CI/CD & Deployment
+
+- **`.github/workflows/deploy.yml`** — on push to `main`, builds changed frontend/backend images (path-filtered), scans them with Trivy for critical CVEs, then pushes multi-arch (`amd64`/`arm64`) images to Docker Hub tagged `<run_number>-<sha>` and `latest`.
+- **`k3s/`** — Kustomize manifests for the k3s deployment: `frontend-deployment.yaml`, `backend-deployment.yaml`, `ingress.yaml`, `networkpolicy.yaml` (pod-to-pod segmentation), `doppler-secret.yaml` / `secrets/` (env injection), and `image-updater.yaml` (automated image tag bumps, tie-broken by run number rather than build timestamp — see `6d12e07`). The frontend/backend image tags in `kustomization.yaml` are bumped automatically by CI on release.
 
 ## License
 
